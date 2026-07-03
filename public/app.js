@@ -1,0 +1,1614 @@
+
+const SECTIONS = [
+  {key:'tasks', label:'Daily tasks', sub:'Track what admin staff completed today.'},
+  {key:'po', label:'Purchase orders', sub:'Order merchandise and supplies, tracked end to end.'},
+  {key:'pettycash', label:'Petty cash', sub:'Reimbursements for staff, tracked end to end.'},
+  {key:'potracker', label:'PO tracker', sub:'PO, check payment, and delivery receipt matched automatically.'},
+  {key:'sales', label:'Sales tracker', sub:'Daily revenue by category and payment method.'},
+  {key:'membership', label:'Membership tracker', sub:'Active, expiring, and expired memberships.'},
+  {key:'repository', label:'Repository', sub:'Every PO, check, and receipt in one place.'},
+];
+
+let state = {
+  currentUser: null,
+  staff: [],
+  products: [],
+  section: 'tasks',
+  modal: null,
+  loaded: {requests:false, tasks:false, sales:false, members:false, staff:false, products:false},
+  requests: [],
+  tasks: [],
+  sales: [],
+  members: [],
+  search: '',
+  taskFilterDate: todayStr(),
+  taskFilterAssignee: 'All',
+  salesMonth: monthStr(new Date()),
+  memberFilter: 'All',
+};
+
+function curUser(){ return state.currentUser; }
+function curName(){ return state.currentUser ? state.currentUser.name : 'Unknown'; }
+function curRole(){ return state.currentUser ? state.currentUser.role : null; }
+function accessTier(role){ return (role==='Supervisor' || role==='Owner') ? 'SuperAdmin' : role; }
+
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+function monthStr(d){ return d.toISOString().slice(0,7); }
+function uid(){ return Math.random().toString(36).slice(2,9); }
+function escapeHtml(s){ const d=document.createElement('div'); d.textContent = s==null?'':String(s); return d.innerHTML; }
+function fmtMoney(n){ return 'PHP ' + Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtDate(iso){ if(!iso) return ''; const d=new Date(iso); return d.toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}); }
+function fmtDateTime(iso){ if(!iso) return ''; const d=new Date(iso); return fmtDate(iso) + ' ' + d.toLocaleTimeString('en-PH',{hour:'numeric',minute:'2-digit'}); }
+function daysBetween(a,b){ return Math.round((new Date(b) - new Date(a)) / 86400000); }
+
+const STAGES = [
+  {key:'Pending Approval'}, {key:'Approved'}, {key:'Check Prepared'},
+  {key:'Check Received by Supervisor'}, {key:'Handed to Admin'}, {key:'Delivered'}, {key:'Recorded in POS'},
+];
+const STAGE_LABELS = {
+  PO: ['Requested','Approved','Check ready','Check received','Handed over','Delivered','In POS'],
+  PettyCash: ['Requested','Approved','Payment ready','Payment received','Handed to staff','Reimbursed','In POS'],
+};
+function stageIndex(status){ if(status==='Rejected') return -1; return STAGES.findIndex(s=>s.key===status); }
+function stageShort(type, i){ return (STAGE_LABELS[type]||STAGE_LABELS.PO)[i]; }
+
+const BRANCHES = [
+  {code:'Manila', prefix:'MNL', label:'Roshan Gym Manila (Tondo)'},
+  {code:'Malabon', prefix:'MBN', label:'Roshan Gym Malabon'},
+];
+const PAYMENT_METHODS = ['Check','Bank transfer','Cash','GCash'];
+
+const SUPPLIERS = [
+  {key:'jdl', name:'JDL Soya Food Products', contact:'John David Lee', phone:'09178105248', payTo:'JDL Soya Food Products', items:'Sting / Gatorade / Vitamilk (JDL) / Summit Water'},
+  {key:'brewmaster_mnl', name:'Brew Master International inc.', contact:'Jarden', phone:'09988455383', payTo:'Brew Master International inc.', items:'Vitamilk / Cobra / Greek Yogurt (Manila)'},
+  {key:'brewmaster_mbn', name:'Brew Master International inc. (MBN)', contact:'Niel Galang', phone:'', payTo:'Loraine Mesina', items:'Vitamilk / Cobra / Greek Yogurt (Malabon)'},
+  {key:'otsuka_mnl', name:'Otsuka-Solar (Manila)', contact:'Rodel Parina', phone:'09171652086', payTo:'Otsuka-Solar Philippines Inc', items:'Pocari Sweat (Manila)'},
+  {key:'otsuka_mbn', name:'Otsuka-Solar (Malabon)', contact:'Jaylord Quijano', phone:'', payTo:'Otsuka-Solar Philippines Inc', items:'Pocari Sweat (Malabon)'},
+  {key:'leminerale', name:'Le Minerale (Manila)', contact:'Arnold', phone:'09623469737', payTo:'Larry Teves Ferreras', items:'Le Minerale'},
+  {key:'shawnlourd', name:'Shawn & Lourd Food & Beverages Station', contact:'Reysie Peñaranda', phone:'09053393509', payTo:'Aldrin Thompson', items:'Nature Spring Water (Malabon)'},
+  {key:'mandy', name:'Mandy Esmeria', contact:'Mandy', phone:'09923869016', payTo:'Epree Ken Villanueva', items:'Membership T-shirt / Eco Bags'},
+  {key:'juanwhey', name:'Juanwhey Supplements', contact:'Rochelle Agdan', phone:'09668661382', payTo:'Juanwhey Suplement Consumer Goods Trading', items:'Supplements'},
+  {key:'gears', name:'Gears Management System', contact:'Bryan Giray', phone:'', payTo:'Bryan Giray', items:'Key fob'},
+];
+
+function branchPrefix(code){ const b = BRANCHES.find(x=>x.code===code); return b ? b.prefix : 'PO'; }
+function productsForSupplierKey(key){
+  if(!key) return state.products;
+  return state.products.filter(p=> !p.supplierKeys || p.supplierKeys.length===0 || p.supplierKeys.includes(key));
+}
+
+// ---------- API HELPERS ----------
+// The browser only ever talks to our own /api/* routes — never to Supabase
+// directly. The service role key lives only on the server (see lib/supabase.js).
+async function apiGet(path){
+  const res = await fetch(path);
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+  return data;
+}
+async function apiPost(path, body){
+  const res = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+  return data;
+}
+async function apiPatch(path, body){
+  const res = await fetch(path, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+  return data;
+}
+async function apiUpload(path, file, label){
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('label', label);
+  const res = await fetch(path, {method:'POST', body:fd});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+  return data;
+}
+
+// ---------- SERVER <-> CLIENT FIELD MAPPING ----------
+// The database uses snake_case and a few different names; the render code
+// below was written against these camelCase shapes, so we translate once
+// here rather than touching every render function.
+function mapRequest(r){
+  return {
+    id:r.id, type:r.type, title:r.title, payee:r.payee, amount:Number(r.amount||0), notes:r.notes||'',
+    branch:r.branch, supplier:r.supplier, paymentMethod:r.payment_method, requestor:r.requestor,
+    lineItems:r.line_items||[], status:r.status, createdBy:r.created_by, createdAt:r.created_at,
+    approval:r.approval||{}, check:r.check_info||{}, receipt:r.receipt||{}, handover:r.handover||{},
+    delivery:r.delivery||{}, pos:r.pos||{}, history:r.history||[],
+    attachments:(r.attachments||[]).map(a=>({id:a.id, name:a.name, mime:a.mime, label:a.label, uploadedBy:a.uploaded_by, uploadedAt:a.uploaded_at})),
+  };
+}
+function mapTask(t){ return {id:t.id, title:t.title, assignee:t.assignee, date:t.date, notes:t.notes, status:t.status, createdBy:t.created_by, createdAt:t.created_at, completedBy:t.completed_by, completedAt:t.completed_at}; }
+function mapSale(s){ return {id:s.id, date:s.date, category:s.category, description:s.description, amount:Number(s.amount||0), method:s.method, enteredBy:s.entered_by, createdAt:s.created_at}; }
+function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[]}; }
+function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
+
+function upsertRequest(mapped){
+  const i = state.requests.findIndex(r=>r.id===mapped.id);
+  if(i>=0) state.requests[i] = mapped; else state.requests.unshift(mapped);
+}
+
+async function loadAll(){
+  let me;
+  try{ me = await apiGet('/api/auth/me'); }catch(e){ me = {user:null}; }
+  if(!me.user){
+    state.currentUser = null;
+    state.loaded = {requests:true, tasks:true, sales:true, members:true, staff:true, products:true};
+    render();
+    return;
+  }
+  state.currentUser = me.user;
+  try{
+    const data = await apiGet('/api/bootstrap');
+    state.requests = (data.requests||[]).map(mapRequest);
+    state.tasks = (data.tasks||[]).map(mapTask);
+    state.sales = (data.sales||[]).map(mapSale);
+    state.members = (data.members||[]).map(mapMember);
+    state.products = (data.products||[]).map(mapProduct);
+    state.staff = data.staff||[];
+    state.loaded = {requests:true, tasks:true, sales:true, members:true, staff:true, products:true};
+  }catch(e){
+    // session cookie probably expired between calls — send back to login
+    state.currentUser = null;
+  }
+  render();
+}
+
+async function refreshStaff(){
+  try{
+    const data = await apiGet('/api/staff');
+    state.staff = data.staff||[];
+  }catch(e){ /* not authorized or not needed */ }
+}
+
+function findReq(id){ return state.requests.find(r=>r.id===id); }
+
+// ---------- RENDER SHELL ----------
+function render(){
+  if(!state.currentUser){
+    document.getElementById('shellRoot').style.display = 'none';
+    renderSignIn();
+    return;
+  }
+  document.getElementById('signinRoot').innerHTML = '';
+  document.getElementById('shellRoot').style.display = '';
+  renderNav();
+  renderUserChip();
+  const visible = visibleSections();
+  if(!visible.find(s=>s.key===state.section)){ state.section = visible.length ? visible[0].key : null; }
+  const sec = SECTIONS.find(s=>s.key===state.section);
+  document.getElementById('sectionTitle').textContent = sec ? sec.label : 'Coach dashboard';
+  document.getElementById('sectionSub').textContent = sec ? sec.sub : 'This dashboard is being built next.';
+  renderContent();
+  renderModal();
+}
+
+function visibleSections(){
+  const tier = accessTier(curRole());
+  if(tier==='Admin' || tier==='SuperAdmin') return SECTIONS;
+  return [];
+}
+
+function renderNav(){
+  const tier = accessTier(curRole());
+  const adminGroup = document.getElementById('nav-admin-group');
+  const coachGroup = document.getElementById('nav-coach-group');
+  const hrGroup = document.getElementById('nav-hr-group');
+  adminGroup.style.display = (tier==='Admin' || tier==='SuperAdmin') ? '' : 'none';
+  coachGroup.style.display = (tier==='Coach' || tier==='SuperAdmin') ? '' : 'none';
+  hrGroup.style.display = (tier==='SuperAdmin') ? '' : 'none';
+
+  const el = document.getElementById('nav-admin');
+  el.innerHTML = '';
+  SECTIONS.forEach(s=>{
+    const b = document.createElement('button');
+    b.className = 'nav-item' + (state.section===s.key ? ' active':'');
+    b.innerHTML = '<span class="nav-dot"></span>' + s.label;
+    b.onclick = ()=>{ state.section = s.key; render(); };
+    el.appendChild(b);
+  });
+}
+
+function initials(name){ return (name||'?').split(' ').filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join(''); }
+
+function renderUserChip(){
+  const el = document.getElementById('userChip');
+  const u = state.currentUser;
+  const tier = accessTier(u.role);
+  el.innerHTML = '';
+  const chip = document.createElement('div'); chip.className='user-chip';
+  chip.innerHTML = `<div class="av">${initials(u.name)}</div><div><div class="nm">${escapeHtml(u.name)}</div><div class="rl">${u.role}${tier==='SuperAdmin'?' · Super admin':''}</div></div>`;
+  const pwBtn = document.createElement('button');
+  pwBtn.className = 'btn sm'; pwBtn.textContent = 'Change password'; pwBtn.style.marginLeft='4px';
+  pwBtn.onclick = ()=>{ state.modal = {type:'changePassword'}; render(); };
+  chip.appendChild(pwBtn);
+  if(tier==='SuperAdmin'){
+    const manageBtn = document.createElement('button');
+    manageBtn.className='btn sm'; manageBtn.textContent='Manage staff'; manageBtn.style.marginLeft='6px';
+    manageBtn.onclick = ()=>{ state.modal={type:'staff'}; render(); };
+    chip.appendChild(manageBtn);
+  }
+  const logoutBtn = document.createElement('button');
+  logoutBtn.className = 'btn sm'; logoutBtn.textContent = 'Log out'; logoutBtn.style.marginLeft='6px';
+  logoutBtn.onclick = async ()=>{ try{ await apiPost('/api/auth/logout', {}); }catch(e){} state.currentUser = null; render(); };
+  chip.appendChild(logoutBtn);
+  el.appendChild(chip);
+}
+
+function renderSignIn(){
+  const root = document.getElementById('signinRoot');
+  root.innerHTML = '';
+  const wrap = document.createElement('div'); wrap.className='signin-wrap';
+  const card = document.createElement('div'); card.className='signin-card';
+  card.innerHTML = `
+    <div class="brand" style="padding:0 0 22px;">
+      <div class="brand-mark"><img src="data:image/jpeg;base64,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" alt="Roshan Gym"></div>
+      <div class="brand-txt"><h1>Roshan Gym</h1><span>Sign in to continue</span></div>
+    </div>
+  `;
+  wrap.appendChild(card);
+  root.appendChild(wrap);
+
+  const form = document.createElement('div');
+  form.innerHTML = `
+    <div class="field"><label>Username</label><input id="login-username" autocomplete="username" placeholder="e.g. loraine"></div>
+    <div class="field"><label>Password</label><input id="login-password" type="password" autocomplete="current-password" placeholder="Password"></div>
+    <div id="login-error"></div>
+  `;
+  card.appendChild(form);
+
+  const b = document.createElement('button'); b.className='btn primary'; b.style.width='100%'; b.style.marginTop='4px';
+  b.textContent = 'Sign in';
+  const userInput = form.querySelector('#login-username');
+  const passInput = form.querySelector('#login-password');
+  const errEl = form.querySelector('#login-error');
+
+  async function attemptLogin(){
+    const username = userInput.value.trim();
+    const password = passInput.value;
+    errEl.innerHTML = '';
+    if(!username || !password){ errEl.innerHTML = '<div class="notice err">Enter your username and password.</div>'; return; }
+    b.disabled = true; b.textContent = 'Signing in…';
+    try{
+      await apiPost('/api/auth/login', {username, password});
+      await loadAll();
+    }catch(e){
+      errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`;
+      b.disabled=false; b.textContent='Sign in';
+    }
+  }
+  b.onclick = attemptLogin;
+  passInput.onkeydown = (e)=>{ if(e.key==='Enter') attemptLogin(); };
+  userInput.onkeydown = (e)=>{ if(e.key==='Enter') passInput.focus(); };
+  card.appendChild(b);
+
+  const note = document.createElement('div'); note.className='hint'; note.style.margin='16px 0 0';
+  note.textContent = 'Passwords are hashed with bcrypt and checked on the server — the browser never sees or stores them. This covers per-person access and an audit trail; for anything beyond internal team use, add rate limiting and consider two-factor login.';
+  card.appendChild(note);
+}
+
+function renderContent(){
+  const el = document.getElementById('content');
+  el.innerHTML = '';
+  const anyLoaded = state.loaded.requests && state.loaded.tasks && state.loaded.sales && state.loaded.members && state.loaded.products;
+  if(!anyLoaded){ el.innerHTML = '<div class="empty">Loading…</div>'; return; }
+  if(!state.section){
+    el.innerHTML = '<div class="empty">The coach dashboard is coming in phase 2. Check back soon.</div>';
+    return;
+  }
+  if(state.section==='tasks') return renderTasks(el);
+  if(state.section==='po') return renderRequestsSection(el, 'PO');
+  if(state.section==='pettycash') return renderRequestsSection(el, 'PettyCash');
+  if(state.section==='potracker') return renderPoTracker(el);
+  if(state.section==='sales') return renderSales(el);
+  if(state.section==='membership') return renderMembership(el);
+  if(state.section==='repository') return renderRepository(el);
+}
+
+function divider(){ const d=document.createElement('div'); d.className='divider'; return d; }
+function closeBtn(){ const b=document.createElement('button'); b.className='modal-close'; b.innerHTML='&times;'; b.onclick=()=>{state.modal=null; render();}; return b; }
+
+// ============ DAILY TASK MANAGER ============
+function renderTasks(el){
+  const assignees = Array.from(new Set(state.tasks.map(t=>t.assignee))).filter(Boolean).sort();
+  const todays = state.tasks.filter(t=>t.date===todayStr());
+  const doneToday = todays.filter(t=>t.status==='Done').length;
+  const overdue = state.tasks.filter(t=>t.status!=='Done' && t.date < todayStr()).length;
+
+  const metrics = document.createElement('div');
+  metrics.className = 'metrics';
+  metrics.innerHTML = `
+    <div class="metric"><div class="num">${todays.length}</div><div class="lbl">Tasks today</div></div>
+    <div class="metric good"><div class="num">${doneToday}</div><div class="lbl">Completed today</div></div>
+    <div class="metric ${overdue>0?'flag':''}"><div class="num">${overdue}</div><div class="lbl">Overdue</div></div>
+    <div class="metric"><div class="num">${assignees.length}</div><div class="lbl">Staff logging tasks</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const head = document.createElement('div');
+  head.className = 'section-head';
+  const toolbar = document.createElement('div');
+  toolbar.className = 'toolbar';
+  toolbar.innerHTML = `
+    <input type="date" id="task-date-filter" value="${state.taskFilterDate}">
+    <select id="task-assignee-filter">
+      <option value="All">All staff</option>
+      ${assignees.map(a=>`<option value="${escapeHtml(a)}" ${state.taskFilterAssignee===a?'selected':''}>${escapeHtml(a)}</option>`).join('')}
+    </select>
+  `;
+  head.innerHTML = '<h2>Task log</h2>';
+  head.appendChild(toolbar);
+  if(curRole()==='Admin'){
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn primary';
+    addBtn.textContent = '+ New task';
+    addBtn.onclick = ()=>{ state.modal={type:'newTask'}; render(); };
+    toolbar.appendChild(addBtn);
+  }
+  el.appendChild(head);
+
+  toolbar.querySelector('#task-date-filter').onchange = (e)=>{ state.taskFilterDate = e.target.value; renderContent(); };
+  toolbar.querySelector('#task-assignee-filter').onchange = (e)=>{ state.taskFilterAssignee = e.target.value; renderContent(); };
+
+  let list = state.tasks.filter(t=> !state.taskFilterDate || t.date===state.taskFilterDate);
+  if(state.taskFilterAssignee!=='All') list = list.filter(t=>t.assignee===state.taskFilterAssignee);
+  list = [...list].sort((a,b)=> (a.status==='Done')-(b.status==='Done') || a.assignee.localeCompare(b.assignee));
+
+  if(list.length===0){
+    el.innerHTML += '';
+    const e = document.createElement('div'); e.className='empty'; e.textContent = 'No tasks logged for this filter yet.';
+    el.appendChild(e);
+    return;
+  }
+
+  list.forEach(t=>{
+    const card = document.createElement('div');
+    card.className = 'card';
+    const pillClass = t.status==='Done' ? 'done' : t.status==='In progress' ? 'progress' : 'todo';
+    card.innerHTML = `
+      <div class="req-top">
+        <div>
+          <div class="req-title">${escapeHtml(t.title)}</div>
+          <div class="req-sub">${escapeHtml(t.assignee)} &middot; ${fmtDate(t.date)}${t.notes ? ' &middot; ' + escapeHtml(t.notes) : ''}</div>
+        </div>
+        <span class="status-pill ${pillClass}">${t.status}</span>
+      </div>
+    `;
+    if(curRole()==='Admin'){
+      const row = document.createElement('div');
+      row.className = 'action-row';
+      if(t.status!=='In progress'){
+        const b = document.createElement('button'); b.className='btn sm'; b.textContent='Mark in progress';
+        b.onclick = async ()=>{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'In progress'}); Object.assign(t, mapTask(task)); render(); };
+        row.appendChild(b);
+      }
+      if(t.status!=='Done'){
+        const b = document.createElement('button'); b.className='btn sm primary'; b.textContent='Mark done';
+        b.onclick = async ()=>{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'Done'}); Object.assign(t, mapTask(task)); render(); };
+        row.appendChild(b);
+      }
+      if(t.status==='Done'){
+        const b = document.createElement('button'); b.className='btn sm ghost'; b.textContent='Reopen';
+        b.onclick = async ()=>{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'To do'}); Object.assign(t, mapTask(task)); render(); };
+        row.appendChild(b);
+      }
+      card.appendChild(row);
+    }
+    el.appendChild(card);
+  });
+}
+
+function renderNewTaskModal(modal){
+  const head = document.createElement('div'); head.className='modal-head';
+  head.innerHTML = '<h2 style="font-size:16px;">New task</h2>'; head.appendChild(closeBtn());
+  modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="field"><label>Task</label><input id="t-title" placeholder="e.g. Restock front desk supplies"></div>
+    <div class="form-grid">
+      <div class="field"><label>Assigned to</label><input id="t-assignee" placeholder="Staff name"></div>
+      <div class="field"><label>Date</label><input id="t-date" type="date" value="${todayStr()}"></div>
+    </div>
+    <div class="field"><label>Notes (optional)</label><input id="t-notes" placeholder="Any detail worth logging"></div>
+    <div id="t-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Add task';
+  b.onclick = async ()=>{
+    const title = document.getElementById('t-title').value.trim();
+    const assignee = document.getElementById('t-assignee').value.trim();
+    const date = document.getElementById('t-date').value || todayStr();
+    const notes = document.getElementById('t-notes').value.trim();
+    const errEl = document.getElementById('t-error');
+    if(!title || !assignee){ errEl.innerHTML = '<div class="notice err">Add a task description and who it is assigned to.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {task} = await apiPost('/api/tasks', {title, assignee, date, notes});
+      state.tasks.unshift(mapTask(task));
+      state.modal = null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add task'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+// ============ PURCHASE ORDERS / PETTY CASH (shared engine) ============
+function computeReqMetrics(type){
+  const reqs = state.requests.filter(r=>r.type===type);
+  const pendingApproval = reqs.filter(r=>r.status==='Pending Approval').length;
+  const awaitingCheck = reqs.filter(r=>r.status==='Approved').length;
+  const outstanding = reqs.filter(r=>r.status!=='Recorded in POS' && r.status!=='Rejected').reduce((s,r)=>s+Number(r.amount||0),0);
+  const trackedChecks = reqs.filter(r=>r.check && r.check.number).length;
+  return {pendingApproval, awaitingCheck, outstanding, trackedChecks};
+}
+
+function renderRequestsSection(el, type){
+  const m = computeReqMetrics(type);
+  const metrics = document.createElement('div');
+  metrics.className = 'metrics';
+  metrics.innerHTML = `
+    <div class="metric ${m.pendingApproval>0?'flag':''}"><div class="num">${m.pendingApproval}</div><div class="lbl">Awaiting approval</div></div>
+    <div class="metric"><div class="num">${m.awaitingCheck}</div><div class="lbl">Awaiting payment prep</div></div>
+    <div class="metric"><div class="num">${fmtMoney(m.outstanding).replace('PHP ','')}</div><div class="lbl">Outstanding (PHP)</div></div>
+    <div class="metric good"><div class="num">${m.trackedChecks}</div><div class="lbl">Checks tracked, no gaps</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const head = document.createElement('div'); head.className='section-head';
+  head.innerHTML = `<h2>${type==='PO'?'Purchase orders':'Reimbursement requests'}</h2>`;
+  const btnGroup = document.createElement('div'); btnGroup.className='toolbar';
+  if(type==='PO'){
+    const supBtn = document.createElement('button'); supBtn.className='btn'; supBtn.textContent='Suppliers directory';
+    supBtn.onclick = ()=>{ state.modal = {type:'suppliers'}; render(); };
+    btnGroup.appendChild(supBtn);
+    const priceBtn = document.createElement('button'); priceBtn.className='btn'; priceBtn.textContent='Manage pricelist';
+    priceBtn.onclick = ()=>{ state.modal = {type:'pricelist'}; render(); };
+    btnGroup.appendChild(priceBtn);
+  }
+  if(curRole()==='Admin'){
+    const b = document.createElement('button'); b.className='btn primary';
+    b.textContent = type==='PO' ? '+ New purchase order' : '+ New reimbursement';
+    b.onclick = ()=>{ state.modal = {type:'newRequest', reqType:type}; render(); };
+    btnGroup.appendChild(b);
+  }
+  head.appendChild(btnGroup);
+  el.appendChild(head);
+
+  const list = state.requests.filter(r=>r.type===type).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  if(list.length===0){
+    const e = document.createElement('div'); e.className='empty';
+    e.textContent = type==='PO' ? 'No purchase orders yet.' : 'No reimbursement requests yet.';
+    el.appendChild(e); return;
+  }
+  list.forEach(r=>el.appendChild(renderReqCard(r)));
+}
+
+function renderReqCard(r){
+  const card = document.createElement('div'); card.className='card row-card';
+  card.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
+  const idx = stageIndex(r.status); const isRejected = r.status==='Rejected';
+  const top = document.createElement('div'); top.className='req-top';
+  top.innerHTML = `
+    <div>
+      <span class="badge ${r.type==='PO'?'po':'pc'}">${r.type==='PO'?'Purchase order':'Petty cash'}</span>
+      ${isRejected?'<span class="badge flag">Rejected</span>':''}
+      ${(r.delivery && r.delivery.varianceStatus==='Needs resolution')?'<span class="badge flag">Payment variance</span>':''}
+      <div class="req-title">${escapeHtml(r.title)}</div>
+      <div class="req-sub">${r.id}${r.branch?' &middot; '+escapeHtml(r.branch):''} &middot; ${escapeHtml(r.supplier||r.payee)} &middot; requested by ${escapeHtml(r.requestor||r.createdBy)}</div>
+    </div>
+    <div class="req-amount">${fmtMoney(r.amount)}</div>
+  `;
+  card.appendChild(top);
+  if(!isRejected){
+    const stepper = document.createElement('div'); stepper.className='stepper';
+    STAGES.forEach((s,i)=>{
+      const sw = document.createElement('div'); sw.className='step';
+      const dot = document.createElement('div'); dot.className='dot'+(i<idx?' done':i===idx?' current':'');
+      const lbl = document.createElement('span'); lbl.className='step-lbl'+(i<idx?' done':i===idx?' current':'');
+      lbl.textContent = stageShort(r.type, i);
+      sw.appendChild(dot); sw.appendChild(lbl); stepper.appendChild(sw);
+      if(i<STAGES.length-1){ const bar=document.createElement('div'); bar.className='bar'+(i<idx?' done':''); stepper.appendChild(bar); }
+    });
+    card.appendChild(stepper);
+  } else {
+    const rej = document.createElement('div'); rej.style.cssText='margin-top:10px;font-size:12px;color:var(--red-ink)';
+    rej.textContent = 'Rejected: ' + (r.approval && r.approval.reason ? r.approval.reason : '');
+    card.appendChild(rej);
+  }
+  const actions = actionsFor(r);
+  if(actions.length){
+    const row = document.createElement('div'); row.className='action-row';
+    actions.forEach(a=>{
+      const b=document.createElement('button'); b.className='btn '+(a.variant||''); b.textContent=a.label;
+      b.onclick=(ev)=>{ ev.stopPropagation(); a.onClick(r); };
+      row.appendChild(b);
+    });
+    card.appendChild(row);
+  }
+  return card;
+}
+
+function actionsFor(r){
+  const acts = [];
+  if(curRole()==='Supervisor' && r.status==='Pending Approval'){
+    acts.push({label:'Approve', variant:'primary', onClick:(r)=>approveReq(r.id)});
+    acts.push({label:'Reject', variant:'danger', onClick:(r)=>{ state.modal={type:'reject', id:r.id}; render(); }});
+  }
+  if(curRole()==='Owner' && r.status==='Approved'){
+    acts.push({label:r.type==='PO'?'Prepare check':'Prepare payment', variant:'primary', onClick:(r)=>{ state.modal={type:'check', id:r.id}; render(); }});
+  }
+  if(curRole()==='Supervisor' && r.status==='Check Prepared'){
+    acts.push({label:'Confirm receipt', variant:'primary', onClick:(r)=>confirmCheckReceipt(r.id)});
+  }
+  if(curRole()==='Admin' && r.status==='Check Received by Supervisor'){
+    acts.push({label:'Confirm handover received', variant:'primary', onClick:(r)=>confirmHandover(r.id)});
+  }
+  if(curRole()==='Admin' && r.status==='Handed to Admin'){
+    acts.push({label: r.type==='PO' ? 'Log delivery' : 'Log reimbursement paid', variant:'primary', onClick:(r)=>{ state.modal={type:'delivery', id:r.id}; render(); }});
+  }
+  if((curRole()==='Admin'||curRole()==='Owner') && r.status==='Delivered'){
+    acts.push({label:'Record in POS', variant:'primary', onClick:(r)=>{ state.modal={type:'pos', id:r.id}; render(); }});
+  }
+  if((curRole()==='Owner'||curRole()==='Supervisor') && r.delivery && r.delivery.varianceStatus==='Needs resolution'){
+    acts.push({label:'Resolve variance', variant:'danger', onClick:(r)=>{ state.modal={type:'variance', id:r.id}; render(); }});
+  }
+  if(curRole()==='Admin' && r.status==='Rejected'){
+    acts.push({label:'Resubmit for approval', onClick:(r)=>resubmit(r.id)});
+  }
+  return acts;
+}
+
+async function approveReq(id){
+  try{ const {request} = await apiPost(`/api/requests/${id}/action`, {action:'approve'}); upsertRequest(mapRequest(request)); render(); }
+  catch(e){ alert(e.message); }
+}
+async function resubmit(id){
+  try{ const {request} = await apiPost(`/api/requests/${id}/action`, {action:'resubmit'}); upsertRequest(mapRequest(request)); render(); }
+  catch(e){ alert(e.message); }
+}
+async function confirmCheckReceipt(id){
+  try{ const {request} = await apiPost(`/api/requests/${id}/action`, {action:'confirm-receipt'}); upsertRequest(mapRequest(request)); render(); }
+  catch(e){ alert(e.message); }
+}
+async function confirmHandover(id){
+  try{ const {request} = await apiPost(`/api/requests/${id}/action`, {action:'confirm-handover'}); upsertRequest(mapRequest(request)); render(); }
+  catch(e){ alert(e.message); }
+}
+
+function renderNewRequestModal(modal, reqType){
+  if(reqType==='PO') return renderNewPOModal(modal);
+  return renderNewPettyCashModal(modal);
+}
+
+function renderNewPettyCashModal(modal){
+  const head = document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<h2 style="font-size:16px;">New reimbursement</h2>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field full"><label>What was this expense for</label><input id="f-title" placeholder="e.g. Grab fare to pick up supplies"></div>
+      <div class="field"><label>Requestor</label><div style="padding:9px 11px;font-size:13.5px;color:var(--ink-0);">${escapeHtml(curName())}</div></div>
+      <div class="field"><label>Staff member (paid to)</label><input id="f-payee" placeholder="e.g. Juan Dela Cruz"></div>
+      <div class="field"><label>Amount (PHP)</label><input id="f-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+      <div class="field full"><label>Notes</label><textarea id="f-notes" placeholder="Any details the supervisor should know"></textarea></div>
+      <div class="field full"><label>Attach receipt (optional)</label><input id="f-file" type="file" accept="image/*,.pdf"><div class="hint">Keep under 4MB. You can skip this and attach it later from the request's Files section.</div></div>
+    </div>
+    <div class="hint" style="margin-bottom:12px;">Petty cash reimbursements are paid out in cash only.</div>
+    <div id="f-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Submit for approval';
+  b.onclick = async ()=>{
+    const title = document.getElementById('f-title').value.trim();
+    const payee = document.getElementById('f-payee').value.trim();
+    const amount = parseFloat(document.getElementById('f-amount').value);
+    const notes = document.getElementById('f-notes').value.trim();
+    const fileInput = document.getElementById('f-file');
+    const errEl = document.getElementById('f-error'); errEl.innerHTML='';
+    if(!title || !payee || !amount || amount<=0){ errEl.innerHTML='<div class="notice err">Fill in what this is for, the payee, and a valid amount.</div>'; return; }
+    const file = fileInput.files[0];
+    if(file && file.size > 4*1024*1024){ errEl.innerHTML='<div class="notice err">That file is over 4MB. Attach a smaller image or PDF.</div>'; return; }
+    b.disabled=true; b.textContent='Submitting…';
+    try{
+      const {request} = await apiPost('/api/requests', {type:'PettyCash', title, payee, amount, notes});
+      let mapped = mapRequest(request);
+      if(file){
+        const {request:withFile} = await apiUpload(`/api/requests/${mapped.id}/attachments`, file, 'Receipt');
+        mapped = mapRequest(withFile);
+      }
+      upsertRequest(mapped);
+      state.modal = null; render();
+    }catch(e){
+      errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`;
+      b.disabled=false; b.textContent='Submit for approval';
+    }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderNewPOModal(modal){
+  const head = document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<h2 style="font-size:16px;">New purchase order</h2>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+
+  const datalist = document.createElement('datalist');
+  datalist.id = 'products-datalist';
+  function fillDatalist(supplierKey){
+    datalist.innerHTML = productsForSupplierKey(supplierKey).filter(p=>p.active!==false).map(p=>`<option value="${escapeHtml(p.item)}">`).join('');
+  }
+  fillDatalist(null);
+  modal.appendChild(datalist);
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field"><label>Branch</label><select id="po-branch">${BRANCHES.map(b=>`<option value="${b.code}">${b.label}</option>`).join('')}</select></div>
+      <div class="field"><label>Requestor</label><div style="padding:9px 11px;font-size:13.5px;color:var(--ink-0);">${escapeHtml(curName())}</div></div>
+      <div class="field full">
+        <label>Supplier</label>
+        <select id="po-supplier">
+          <option value="">— Choose from supplier list —</option>
+          ${SUPPLIERS.map(s=>`<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('')}
+          <option value="__other__">Other (not in supplier list)</option>
+        </select>
+      </div>
+      <div class="field full" id="po-supplier-other-wrap" style="display:none"><label>Supplier name</label><input id="po-supplier-other" placeholder="Supplier name"></div>
+      <div class="field full"><label>Check payable to</label><input id="po-payee" placeholder="Auto-fills from supplier"></div>
+    </div>
+    <div class="hint" id="po-supplier-hint" style="margin-bottom:12px;"></div>
+    <div class="hint" style="margin-bottom:12px;">Purchase orders are paid by check only.</div>
+  `;
+  modal.appendChild(wrap);
+
+  const supplierSel = wrap.querySelector('#po-supplier');
+  const otherWrap = wrap.querySelector('#po-supplier-other-wrap');
+  const payeeInput = wrap.querySelector('#po-payee');
+  const hintEl = wrap.querySelector('#po-supplier-hint');
+  supplierSel.onchange = ()=>{
+    const val = supplierSel.value;
+    if(val==='__other__'){ otherWrap.style.display=''; hintEl.textContent=''; payeeInput.value=''; fillDatalist(null); return; }
+    otherWrap.style.display = 'none';
+    const sup = SUPPLIERS.find(s=>s.key===val);
+    if(sup){ payeeInput.value = sup.payTo; hintEl.textContent = 'Contact: ' + (sup.contact||'—') + (sup.phone?' · '+sup.phone:'') + ' · Items below are filtered to what ' + sup.name + ' supplies.'; fillDatalist(sup.key); }
+    else { hintEl.textContent=''; fillDatalist(null); }
+  };
+
+  // line items
+  const itemsCard = document.createElement('div');
+  itemsCard.className = 'card';
+  itemsCard.innerHTML = `<h2 style="font-size:13px;color:var(--ink-1);margin-bottom:10px;">Order items</h2><div id="po-rows"></div>`;
+  modal.appendChild(itemsCard);
+  const addRowBtn = document.createElement('button');
+  addRowBtn.className = 'btn sm'; addRowBtn.textContent = '+ Add item'; addRowBtn.style.marginTop='6px';
+  itemsCard.appendChild(addRowBtn);
+
+  let rows = [{id:uid(), item:'', qty:1, cost:0}];
+  const rowsEl = itemsCard.querySelector('#po-rows');
+
+  function renderRows(){
+    rowsEl.innerHTML = '';
+    rows.forEach(row=>{
+      const rowEl = document.createElement('div');
+      rowEl.style.cssText = 'display:grid;grid-template-columns:2fr 70px 100px 100px 32px;gap:8px;align-items:center;margin-bottom:8px;';
+      rowEl.innerHTML = `
+        <input list="products-datalist" placeholder="Item" value="${escapeHtml(row.item)}" data-f="item" style="background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:8px 10px;font-size:13px;">
+        <input type="number" min="0" step="1" value="${row.qty}" data-f="qty" style="background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:8px 8px;font-size:13px;">
+        <input type="number" min="0" step="0.01" value="${row.cost}" data-f="cost" style="background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:8px 8px;font-size:13px;">
+        <div style="font-family:var(--font-m);font-size:12.5px;color:var(--ink-1);text-align:right;padding-right:4px;">${fmtMoney(row.qty*row.cost).replace('PHP ','')}</div>
+        <button data-act="remove" style="background:transparent;border:1px solid var(--line-strong);border-radius:7px;color:var(--ink-2);height:32px;">&times;</button>
+      `;
+      const itemInput = rowEl.querySelector('[data-f="item"]');
+      const qtyInput = rowEl.querySelector('[data-f="qty"]');
+      const costInput = rowEl.querySelector('[data-f="cost"]');
+      itemInput.oninput = ()=>{
+        row.item = itemInput.value;
+        const match = state.products.find(p=>p.item.toLowerCase()===itemInput.value.toLowerCase());
+        if(match && !row.costTouched){ row.cost = match.cost; costInput.value = match.cost; }
+        recompute();
+      };
+      qtyInput.oninput = ()=>{ row.qty = parseFloat(qtyInput.value)||0; recompute(); };
+      costInput.oninput = ()=>{ row.cost = parseFloat(costInput.value)||0; row.costTouched=true; recompute(); };
+      rowEl.querySelector('[data-act="remove"]').onclick = ()=>{ rows = rows.filter(x=>x.id!==row.id); if(rows.length===0) rows.push({id:uid(), item:'', qty:1, cost:0}); renderRows(); };
+      rowsEl.appendChild(rowEl);
+    });
+    recompute();
+  }
+  addRowBtn.onclick = ()=>{ rows.push({id:uid(), item:'', qty:1, cost:0}); renderRows(); };
+
+  const totalCard = document.createElement('div');
+  totalCard.className = 'check-callout';
+  totalCard.innerHTML = `<div class="hint" style="margin-bottom:2px;">Total amount</div><div class="num" id="po-total">PHP 0.00</div>`;
+  modal.appendChild(totalCard);
+  function recompute(){
+    const total = rows.reduce((s,r)=>s+(r.qty*r.cost),0);
+    document.getElementById('po-total').textContent = fmtMoney(total);
+  }
+  renderRows();
+
+  const rest = document.createElement('div');
+  rest.innerHTML = `
+    <div class="field full" style="margin-top:14px;"><label>Notes</label><textarea id="po-notes" placeholder="Any details the supervisor should know"></textarea></div>
+    <div id="po-error"></div>
+  `;
+  modal.appendChild(rest);
+
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Submit for approval';
+  b.onclick = async ()=>{
+    const branch = wrap.querySelector('#po-branch').value;
+    const supplierVal = supplierSel.value;
+    const supplierObj = SUPPLIERS.find(s=>s.key===supplierVal);
+    const supplierName = supplierVal==='__other__' ? wrap.querySelector('#po-supplier-other').value.trim() : (supplierObj ? supplierObj.name : '');
+    const payee = payeeInput.value.trim();
+    const notes = document.getElementById('po-notes').value.trim();
+    const errEl = document.getElementById('po-error'); errEl.innerHTML='';
+
+    const validRows = rows.filter(r=>r.item.trim() && r.qty>0);
+    const total = validRows.reduce((s,r)=>s+(r.qty*r.cost),0);
+
+    if(!supplierName){ errEl.innerHTML='<div class="notice err">Choose a supplier, or enter one if it is not on the list.</div>'; return; }
+    if(!payee){ errEl.innerHTML='<div class="notice err">Enter who the check should be payable to.</div>'; return; }
+    if(validRows.length===0 || total<=0){ errEl.innerHTML='<div class="notice err">Add at least one item with a quantity greater than zero.</div>'; return; }
+
+    b.disabled=true; b.textContent='Submitting…';
+    try{
+      const {request} = await apiPost('/api/requests', {
+        type:'PO', branch, supplier:supplierName, payee,
+        lineItems: validRows.map(r=>({item:r.item, qty:r.qty, cost:r.cost})),
+        notes,
+      });
+      upsertRequest(mapRequest(request));
+      state.modal = null; render();
+    }catch(e){
+      errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`;
+      b.disabled=false; b.textContent='Submit for approval';
+    }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+// ============ DETAIL / ACTION MODALS (shared) ============
+function renderDetailModal(modal){
+  const r = findReq(state.modal.id); if(!r){ state.modal=null; return; }
+  const head = document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<div>
+    <span class="badge ${r.type==='PO'?'po':'pc'}">${r.type==='PO'?'Purchase order':'Petty cash'}</span>
+    <h2 style="font-size:16px;margin-top:8px;">${escapeHtml(r.title)}</h2>
+    <div class="req-sub" style="margin-top:4px;">${r.id}${r.branch?' &middot; '+escapeHtml(r.branch):''} &middot; ${escapeHtml(r.supplier||r.payee)} &middot; ${fmtMoney(r.amount)}</div>
+  </div>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+  if(r.payee || r.paymentMethod || r.requestor){
+    const meta = document.createElement('div');
+    meta.style.cssText = 'font-size:12.5px;color:var(--ink-2);margin-bottom:12px;';
+    meta.innerHTML = `Payable to <span style="color:var(--ink-0)">${escapeHtml(r.payee)}</span> &middot; ${escapeHtml(r.paymentMethod||'Check')} &middot; requested by ${escapeHtml(r.requestor||r.createdBy)}`;
+    modal.appendChild(meta);
+  }
+  if(r.lineItems && r.lineItems.length){
+    const t = document.createElement('table'); t.className='simple'; t.style.marginBottom='14px';
+    t.innerHTML = `<thead><tr><th>Item</th><th>Qty</th><th>Unit cost</th><th style="text-align:right">Total</th></tr></thead>` +
+      '<tbody>' + r.lineItems.map(li=>`<tr><td>${escapeHtml(li.item)}</td><td>${li.qty}</td><td>${fmtMoney(li.cost).replace('PHP ','')}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(li.total).replace('PHP ','')}</td></tr>`).join('') + '</tbody>';
+    modal.appendChild(t);
+  }
+  if(r.notes){ const n=document.createElement('div'); n.style.cssText='font-size:13px;color:var(--ink-1);margin-bottom:14px;'; n.textContent=r.notes; modal.appendChild(n); }
+  if(r.check && r.check.number){
+    const cc=document.createElement('div'); cc.className='check-callout';
+    cc.innerHTML = `<div class="hint" style="margin-bottom:2px;">${(r.paymentMethod && r.paymentMethod!=='Check') ? r.paymentMethod+' reference on record' : (r.type==='PO'?'Check number on record':'Payment reference on record')}</div><div class="num">#${escapeHtml(r.check.number)}</div>${r.check.amount!=null?`<div class="hint" style="margin-top:4px;">Amount: ${fmtMoney(r.check.amount)}</div>`:''}`;
+    modal.appendChild(cc);
+  }
+  if(r.delivery && r.delivery.deliveredAmount!=null && r.type==='PO'){
+    const isVariance = r.delivery.varianceStatus==='Needs resolution';
+    const isResolved = r.delivery.varianceStatus==='Resolved';
+    const box = document.createElement('div');
+    box.className = isVariance ? 'notice err' : (isResolved ? 'notice ok' : 'notice ok');
+    let html = `Delivery receipt amount: <strong style="font-weight:500">${fmtMoney(r.delivery.deliveredAmount)}</strong>`;
+    if(isVariance){ html += ` — differs from the check by ${fmtMoney(Math.abs(r.delivery.variance))}. Not yet resolved.`; }
+    else if(isResolved){ html += ` — variance resolved: ${escapeHtml(r.delivery.resolution)}${r.delivery.resolutionNotes?' — '+escapeHtml(r.delivery.resolutionNotes):''}.`; }
+    else { html += ` — matches the check amount.`; }
+    box.innerHTML = html;
+    modal.appendChild(box);
+  }
+  if(r.pos && r.status==='Recorded in POS'){
+    const box = document.createElement('div'); box.className='notice ok';
+    box.textContent = 'POS: ' + (r.pos.reference ? 'recorded as '+r.pos.reference : '') + (r.pos.hasScreenshot ? (r.pos.reference?' · ':'')+'screenshot on file' : '') + (!r.pos.reference && !r.pos.hasScreenshot ? 'recorded' : '');
+    modal.appendChild(box);
+  }
+  const actions = actionsFor(r);
+  if(actions.length){
+    const row=document.createElement('div'); row.className='action-row';
+    actions.forEach(a=>{ const b=document.createElement('button'); b.className='btn '+(a.variant||''); b.textContent=a.label; b.onclick=()=>a.onClick(r); row.appendChild(b); });
+    modal.appendChild(row);
+  }
+  modal.appendChild(divider());
+  const filesHead=document.createElement('h3'); filesHead.style.cssText='font-size:12px;color:var(--ink-2);margin-bottom:8px;letter-spacing:.03em;';
+  filesHead.textContent = 'Files (' + (r.attachments||[]).length + ')'; modal.appendChild(filesHead);
+  const fileList=document.createElement('div'); fileList.className='file-list';
+  if(!r.attachments || r.attachments.length===0){ fileList.innerHTML='<div class="hint">No files attached yet.</div>'; }
+  else{
+    r.attachments.forEach(a=>{
+      const row=document.createElement('div'); row.className='file-row';
+      row.innerHTML = `<div><div class="file-name">${escapeHtml(a.name)}</div><div class="file-meta">${escapeHtml(a.label)} &middot; ${a.uploadedBy} &middot; ${fmtDateTime(a.uploadedAt)}</div></div>`;
+      const btn=document.createElement('button'); btn.className='btn ghost'; btn.textContent='View';
+      btn.onclick=()=>{ window.open(`/api/attachments/${a.id}`, '_blank'); };
+      row.appendChild(btn); fileList.appendChild(row);
+    });
+  }
+  modal.appendChild(fileList);
+  const addFileRow = document.createElement('div');
+  addFileRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap;';
+  addFileRow.innerHTML = `
+    <input id="addfile-label" placeholder="What is this file (e.g. Purchase order)" style="background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:8px 10px;font-size:12.5px;flex:1;min-width:160px;">
+    <input id="addfile-input" type="file" accept="image/*,.pdf" style="font-size:12.5px;">
+  `;
+  const addFileBtn = document.createElement('button'); addFileBtn.className='btn sm'; addFileBtn.textContent='Attach file'; addFileBtn.style.marginTop='6px';
+  addFileBtn.onclick = async ()=>{
+    const label = document.getElementById('addfile-label').value.trim() || 'Attachment';
+    const fileInput = document.getElementById('addfile-input');
+    const file = fileInput.files[0];
+    if(!file){ return; }
+    if(file.size > 4*1024*1024){ alert('That file is over 4MB. Attach a smaller image or PDF.'); return; }
+    addFileBtn.disabled = true; addFileBtn.textContent = 'Saving…';
+    try{
+      const {request} = await apiUpload(`/api/requests/${r.id}/attachments`, file, label);
+      upsertRequest(mapRequest(request));
+      state.modal = {type:'detail', id:r.id}; render();
+    }catch(e){
+      alert(e.message);
+      addFileBtn.disabled = false; addFileBtn.textContent = 'Attach file';
+    }
+  };
+  modal.appendChild(addFileRow);
+  modal.appendChild(addFileBtn);
+  modal.appendChild(divider());
+  const tlHead=document.createElement('h3'); tlHead.style.cssText='font-size:12px;color:var(--ink-2);margin-bottom:8px;letter-spacing:.03em;'; tlHead.textContent='History';
+  modal.appendChild(tlHead);
+  const tl=document.createElement('div'); tl.className='timeline';
+  [...r.history].reverse().forEach(h=>{
+    const it=document.createElement('div'); it.className='tl-item';
+    it.innerHTML = `<div class="tl-when">${fmtDateTime(h.at)} &middot; ${h.by}</div><div class="tl-what">${escapeHtml(h.text)}</div>`;
+    tl.appendChild(it);
+  });
+  modal.appendChild(tl);
+}
+
+function renderRejectModal(modal){
+  const r = findReq(state.modal.id);
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Reject request</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const field=document.createElement('div'); field.className='field'; field.innerHTML='<label>Reason</label><textarea id="reject-reason" placeholder="Why is this being sent back?"></textarea>'; modal.appendChild(field);
+  const errWrap=document.createElement('div'); errWrap.id='reject-error'; modal.appendChild(errWrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn danger'; b.textContent='Reject request';
+  b.onclick=async ()=>{
+    const reason=document.getElementById('reject-reason').value.trim();
+    const errEl=document.getElementById('reject-error');
+    if(!reason){ errEl.innerHTML='<div class="notice err">Add a reason so the admin knows what to fix.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {request} = await apiPost(`/api/requests/${r.id}/action`, {action:'reject', reason});
+      upsertRequest(mapRequest(request));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Reject request'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderCheckModal(modal){
+  const r = findReq(state.modal.id); const isPO = r.type==='PO';
+  const method = r.paymentMethod || (r.type==='PO' ? 'Check' : 'Cash');
+  const isCheck = method === 'Check';
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML = `<h2 style="font-size:16px;">${isCheck ? (isPO?'Prepare check':'Prepare payment') : 'Prepare '+method.toLowerCase()+' payment'}</h2>`; head.appendChild(closeBtn()); modal.appendChild(head);
+  const info=document.createElement('div'); info.className='notice';
+  info.textContent = 'Paying ' + r.payee + ' — ' + fmtMoney(r.amount) + ' via ' + method + '. The reference entered here is what the supervisor confirms on handover, so it can never go untracked.';
+  modal.appendChild(info);
+  const grid=document.createElement('div');
+  grid.innerHTML = `
+    <div class="form-grid">
+      <div class="field"><label>${isCheck ? 'Check number' : method+' reference'}</label><input id="check-number" placeholder="${isCheck?'e.g. 0001234':'e.g. transaction ID, or CASH'}"></div>
+      <div class="field"><label>Payment date</label><input id="check-date" type="date" value="${todayStr()}"></div>
+      <div class="field"><label>Amount (PHP)</label><input id="check-amount" type="number" min="0" step="0.01" value="${r.amount}"></div>
+      <div class="field"><label>Attach copy (optional)</label><input id="check-file" type="file" accept="image/*,.pdf"></div>
+    </div>
+    <div id="check-error"></div>
+  `;
+  modal.appendChild(grid);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent = isCheck ? (isPO?'Mark check prepared':'Mark payment prepared') : 'Mark payment prepared';
+  b.onclick=async ()=>{
+    const num=document.getElementById('check-number').value.trim();
+    const payDate=document.getElementById('check-date').value || todayStr();
+    const payAmount=parseFloat(document.getElementById('check-amount').value);
+    const errEl=document.getElementById('check-error'); errEl.innerHTML='';
+    if(!num){ errEl.innerHTML='<div class="notice err">Enter the reference number.</div>'; return; }
+    if(!payAmount || payAmount<=0){ errEl.innerHTML='<div class="notice err">Enter a valid amount.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const fileInput=document.getElementById('check-file'); const file=fileInput.files[0];
+      if(file){ await apiUpload(`/api/requests/${r.id}/attachments`, file, isCheck?'Check copy':'Payment copy'); }
+      const {request} = await apiPost(`/api/requests/${r.id}/action`, {action:'check', number:num, date:payDate, amount:payAmount});
+      upsertRequest(mapRequest(request));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Mark payment prepared'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderDeliveryModal(modal){
+  const r = findReq(state.modal.id); const isPO = r.type==='PO';
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML = `<h2 style="font-size:16px;">${isPO?'Log delivery':'Log reimbursement paid'}</h2>`; head.appendChild(closeBtn()); modal.appendChild(head);
+  const checkAmount = (r.check && r.check.amount!=null) ? r.check.amount : r.amount;
+  if(isPO){
+    const info=document.createElement('div'); info.className='notice';
+    info.textContent = 'Check was written for ' + fmtMoney(checkAmount) + '. Enter what the delivery receipt actually shows — if a supplier was out of stock on something, or sent extra, the amounts will differ and that gets flagged for follow-up.';
+    modal.appendChild(info);
+  }
+  const grid=document.createElement('div');
+  grid.innerHTML = `
+    <div class="form-grid">
+      <div class="field full"><label>${isPO?'Attach delivery receipt / invoice':'Attach acknowledgment (optional)'}</label><input id="delivery-file" type="file" accept="image/*,.pdf"></div>
+      ${isPO ? `<div class="field"><label>Amount per delivery receipt (PHP)</label><input id="delivery-amount" type="number" min="0" step="0.01" value="${checkAmount}"></div>` : ''}
+      <div class="field${isPO?'':' full'}"><label>Notes (optional)</label><input id="delivery-notes" placeholder="${isPO?'e.g. 2 boxes out of stock, credited next order':'e.g. paid in cash to staff'}"></div>
+    </div>
+    <div id="delivery-error"></div>
+  `;
+  modal.appendChild(grid);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent = isPO?'Mark delivered':'Mark reimbursed';
+  b.onclick=async ()=>{
+    const fileInput=document.getElementById('delivery-file'); const notes=document.getElementById('delivery-notes').value.trim(); const file=fileInput.files[0];
+    const errEl=document.getElementById('delivery-error'); errEl.innerHTML='';
+    if(isPO && !file){ errEl.innerHTML='<div class="notice err">Attach the delivery receipt or invoice.</div>'; return; }
+    let deliveredAmount = r.amount;
+    if(isPO){
+      deliveredAmount = parseFloat(document.getElementById('delivery-amount').value);
+      if(!deliveredAmount || deliveredAmount<0){ errEl.innerHTML='<div class="notice err">Enter the amount shown on the delivery receipt.</div>'; return; }
+    }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      if(file){ await apiUpload(`/api/requests/${r.id}/attachments`, file, isPO?'Delivery receipt / invoice':'Acknowledgment'); }
+      const {request} = await apiPost(`/api/requests/${r.id}/action`, {action:'delivery', notes, deliveredAmount});
+      upsertRequest(mapRequest(request));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent = isPO?'Mark delivered':'Mark reimbursed'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderVarianceModal(modal){
+  const r = findReq(state.modal.id);
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Resolve payment variance</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const checkAmount = (r.check && r.check.amount!=null) ? r.check.amount : r.amount;
+  const info=document.createElement('div'); info.className='notice';
+  info.textContent = 'Check: ' + fmtMoney(checkAmount) + '  ·  Delivery receipt: ' + fmtMoney(r.delivery.deliveredAmount) + '  ·  Difference: ' + fmtMoney(Math.abs(r.delivery.variance)) + (r.delivery.variance<0 ? ' short' : ' over') + '. ' + (r.delivery.notes||'');
+  modal.appendChild(info);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="field"><label>How was this resolved</label><select id="var-resolution">
+      <option value="Credit applied to next PO">Credit applied to next PO</option>
+      <option value="Refund received from supplier">Refund received from supplier</option>
+      <option value="Additional payment issued">Additional payment issued</option>
+      <option value="Written off, approved by owner">Written off, approved by owner</option>
+      <option value="Other">Other</option>
+    </select></div>
+    <div class="field full"><label>Notes</label><textarea id="var-notes" placeholder="Reference number, who approved it, etc."></textarea></div>
+    <div id="var-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Mark variance resolved';
+  b.onclick=async ()=>{
+    const resolution = document.getElementById('var-resolution').value;
+    const notes = document.getElementById('var-notes').value.trim();
+    const errEl=document.getElementById('var-error');
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {request} = await apiPost(`/api/requests/${r.id}/action`, {action:'resolve-variance', resolution, notes});
+      upsertRequest(mapRequest(request));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Mark variance resolved'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderPosModal(modal){
+  const r = findReq(state.modal.id);
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Record in POS</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const info=document.createElement('div'); info.className='notice'; info.textContent='Confirm this expense has been entered in the gym POS system. If your POS does not generate an entry number, attach a screenshot of the entry instead — one of the two is required.'; modal.appendChild(info);
+  const field=document.createElement('div'); field.className='field'; field.innerHTML='<label>POS reference / entry number (optional if you attach a screenshot)</label><input id="pos-ref" placeholder="e.g. EXP-00231, or leave blank">'; modal.appendChild(field);
+  const fileField=document.createElement('div'); fileField.className='field full'; fileField.innerHTML='<label>Screenshot of POS entry (optional if you enter a reference)</label><input id="pos-file" type="file" accept="image/*,.pdf">'; modal.appendChild(fileField);
+  const errWrap=document.createElement('div'); errWrap.id='pos-error'; modal.appendChild(errWrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Confirm recorded';
+  b.onclick=async ()=>{
+    const ref=document.getElementById('pos-ref').value.trim();
+    const fileInput=document.getElementById('pos-file'); const file=fileInput.files[0];
+    const errEl=document.getElementById('pos-error'); errEl.innerHTML='';
+    if(!ref && !file){ errEl.innerHTML='<div class="notice err">Enter a POS reference, attach a screenshot of the entry, or both.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      if(file){ await apiUpload(`/api/requests/${r.id}/attachments`, file, 'POS entry screenshot'); }
+      const {request} = await apiPost(`/api/requests/${r.id}/action`, {action:'pos', reference:ref});
+      upsertRequest(mapRequest(request));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Confirm recorded'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+// ============ SALES TRACKER ============
+const SALE_CATEGORIES = ['Membership','Day pass','Retail / merchandise','Personal training','Other'];
+const SALE_METHODS = ['Cash','Card','Bank transfer','GCash'];
+
+function renderSales(el){
+  const month = state.salesMonth;
+  const monthSales = state.sales.filter(s=>s.date.slice(0,7)===month);
+  const todaySales = state.sales.filter(s=>s.date===todayStr());
+  const monthTotal = monthSales.reduce((s,x)=>s+Number(x.amount||0),0);
+  const todayTotal = todaySales.reduce((s,x)=>s+Number(x.amount||0),0);
+
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric"><div class="num">${fmtMoney(todayTotal).replace('PHP ','')}</div><div class="lbl">Today (PHP)</div></div>
+    <div class="metric good"><div class="num">${fmtMoney(monthTotal).replace('PHP ','')}</div><div class="lbl">This month (PHP)</div></div>
+    <div class="metric"><div class="num">${monthSales.length}</div><div class="lbl">Entries this month</div></div>
+    <div class="metric"><div class="num">${monthSales.length? fmtMoney(monthTotal/monthSales.length).replace('PHP ',''):'0.00'}</div><div class="lbl">Avg per entry</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const byCat = {};
+  SALE_CATEGORIES.forEach(c=>byCat[c]=0);
+  monthSales.forEach(s=>{ byCat[s.category] = (byCat[s.category]||0) + Number(s.amount||0); });
+  const maxCat = Math.max(1, ...Object.values(byCat));
+  const catCard = document.createElement('div'); catCard.className='card';
+  catCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">By category, this month</h2>';
+  SALE_CATEGORIES.forEach(c=>{
+    const row = document.createElement('div'); row.className='bar-row';
+    row.innerHTML = `<div class="bl">${c}</div><div class="bt"><div class="bf" style="width:${(byCat[c]/maxCat*100).toFixed(0)}%"></div></div><div class="bv">${fmtMoney(byCat[c]).replace('PHP ','')}</div>`;
+    catCard.appendChild(row);
+  });
+  el.appendChild(catCard);
+
+  const head = document.createElement('div'); head.className='section-head';
+  head.innerHTML = '<h2>Entries</h2>';
+  const toolbar = document.createElement('div'); toolbar.className='toolbar';
+  toolbar.innerHTML = `<input type="month" id="sales-month" value="${month}">`;
+  head.appendChild(toolbar);
+  if(curRole()==='Admin'){
+    const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ Log sale';
+    b.onclick=()=>{ state.modal={type:'newSale'}; render(); };
+    toolbar.appendChild(b);
+  }
+  el.appendChild(head);
+  toolbar.querySelector('#sales-month').onchange = (e)=>{ state.salesMonth = e.target.value; renderContent(); };
+
+  if(monthSales.length===0){
+    const e=document.createElement('div'); e.className='empty'; e.textContent='No sales logged for this month yet.'; el.appendChild(e); return;
+  }
+  const table = document.createElement('table'); table.className='simple';
+  table.innerHTML = `<thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Method</th><th>Entered by</th><th style="text-align:right">Amount</th></tr></thead>`;
+  const tbody = document.createElement('tbody');
+  [...monthSales].sort((a,b)=>b.date.localeCompare(a.date)).forEach(s=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${fmtDate(s.date)}</td><td>${escapeHtml(s.category)}</td><td>${escapeHtml(s.description||'—')}</td><td>${escapeHtml(s.method)}</td><td>${escapeHtml(s.enteredBy)}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(s.amount)}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  const tableCard = document.createElement('div'); tableCard.className='card';
+  tableCard.appendChild(table);
+  el.appendChild(tableCard);
+}
+
+function renderNewSaleModal(modal){
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Log sale</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field"><label>Date</label><input id="s-date" type="date" value="${todayStr()}"></div>
+      <div class="field"><label>Category</label><select id="s-cat">${SALE_CATEGORIES.map(c=>`<option value="${c}">${c}</option>`).join('')}</select></div>
+      <div class="field"><label>Amount (PHP)</label><input id="s-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+      <div class="field"><label>Payment method</label><select id="s-method">${SALE_METHODS.map(m=>`<option value="${m}">${m}</option>`).join('')}</select></div>
+      <div class="field full"><label>Description (optional)</label><input id="s-desc" placeholder="e.g. 3-month membership, walk-in"></div>
+    </div>
+    <div id="s-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Add entry';
+  b.onclick=async ()=>{
+    const date=document.getElementById('s-date').value || todayStr();
+    const category=document.getElementById('s-cat').value;
+    const amount=parseFloat(document.getElementById('s-amount').value);
+    const method=document.getElementById('s-method').value;
+    const description=document.getElementById('s-desc').value.trim();
+    const errEl=document.getElementById('s-error'); errEl.innerHTML='';
+    if(!amount || amount<=0){ errEl.innerHTML='<div class="notice err">Enter a valid amount.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {sale} = await apiPost('/api/sales', {date, category, amount, method, description});
+      state.sales.unshift(mapSale(sale));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add entry'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+// ============ MEMBERSHIP TRACKER ============
+const PLAN_MONTHS = {'Monthly':1, 'Quarterly':3, 'Annual':12, 'Class pack':0};
+
+function memberStatus(m){
+  const days = daysBetween(todayStr(), m.expiryDate);
+  if(days < 0) return 'Expired';
+  if(days <= 7) return 'Expiring soon';
+  return 'Active';
+}
+
+function renderMembership(el){
+  const withStatus = state.members.map(m=>({...m, computed: memberStatus(m)}));
+  const active = withStatus.filter(m=>m.computed==='Active').length;
+  const expiringSoon = withStatus.filter(m=>m.computed==='Expiring soon').length;
+  const expired = withStatus.filter(m=>m.computed==='Expired').length;
+  const monthRevenue = state.members.reduce((sum,m)=>{
+    const hist = (m.history||[]).filter(h=>h.date.slice(0,7)===monthStr(new Date()));
+    return sum + hist.reduce((s,h)=>s+Number(h.amount||0),0);
+  },0);
+
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric good"><div class="num">${active}</div><div class="lbl">Active members</div></div>
+    <div class="metric ${expiringSoon>0?'flag':''}"><div class="num">${expiringSoon}</div><div class="lbl">Expiring within 7 days</div></div>
+    <div class="metric"><div class="num">${expired}</div><div class="lbl">Expired</div></div>
+    <div class="metric"><div class="num">${fmtMoney(monthRevenue).replace('PHP ','')}</div><div class="lbl">Revenue this month (PHP)</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const head = document.createElement('div'); head.className='section-head';
+  head.innerHTML = '<h2>Members</h2>';
+  const toolbar = document.createElement('div'); toolbar.className='toolbar';
+  toolbar.innerHTML = `<select id="member-filter">
+    <option value="All" ${state.memberFilter==='All'?'selected':''}>All</option>
+    <option value="Active" ${state.memberFilter==='Active'?'selected':''}>Active</option>
+    <option value="Expiring soon" ${state.memberFilter==='Expiring soon'?'selected':''}>Expiring soon</option>
+    <option value="Expired" ${state.memberFilter==='Expired'?'selected':''}>Expired</option>
+  </select>`;
+  head.appendChild(toolbar);
+  if(curRole()==='Admin'){
+    const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ New member';
+    b.onclick=()=>{ state.modal={type:'newMember'}; render(); };
+    toolbar.appendChild(b);
+  }
+  el.appendChild(head);
+  toolbar.querySelector('#member-filter').onchange=(e)=>{ state.memberFilter=e.target.value; renderContent(); };
+
+  let list = withStatus;
+  if(state.memberFilter!=='All') list = list.filter(m=>m.computed===state.memberFilter);
+  list.sort((a,b)=> a.expiryDate.localeCompare(b.expiryDate));
+
+  if(list.length===0){
+    const e=document.createElement('div'); e.className='empty'; e.textContent='No members match this filter.'; el.appendChild(e); return;
+  }
+
+  list.forEach(m=>{
+    const card = document.createElement('div'); card.className='card';
+    const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
+    card.innerHTML = `
+      <div class="req-top">
+        <div>
+          <div class="req-title">${escapeHtml(m.name)}</div>
+          <div class="req-sub">${escapeHtml(m.contact||'—')} &middot; ${escapeHtml(m.plan)} &middot; expires ${fmtDate(m.expiryDate)}</div>
+        </div>
+        <span class="badge ${badgeClass}">${m.computed}</span>
+      </div>
+    `;
+    if(curRole()==='Admin'){
+      const row = document.createElement('div'); row.className='action-row';
+      const b = document.createElement('button'); b.className='btn primary sm'; b.textContent='Renew';
+      b.onclick=()=>{ state.modal={type:'renewMember', id:m.id}; render(); };
+      row.appendChild(b);
+      card.appendChild(row);
+    }
+    el.appendChild(card);
+  });
+}
+
+function renderNewMemberModal(modal){
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">New member</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field full"><label>Name</label><input id="m-name" placeholder="Full name"></div>
+      <div class="field"><label>Contact</label><input id="m-contact" placeholder="Phone or email"></div>
+      <div class="field"><label>Plan</label><select id="m-plan">${Object.keys(PLAN_MONTHS).map(p=>`<option value="${p}">${p}</option>`).join('')}</select></div>
+      <div class="field"><label>Start date</label><input id="m-start" type="date" value="${todayStr()}"></div>
+      <div class="field"><label>Amount paid (PHP)</label><input id="m-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+    </div>
+    <div id="m-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Add member';
+  b.onclick=async ()=>{
+    const name=document.getElementById('m-name').value.trim();
+    const contact=document.getElementById('m-contact').value.trim();
+    const plan=document.getElementById('m-plan').value;
+    const start=document.getElementById('m-start').value || todayStr();
+    const amount=parseFloat(document.getElementById('m-amount').value)||0;
+    const errEl=document.getElementById('m-error'); errEl.innerHTML='';
+    if(!name){ errEl.innerHTML='<div class="notice err">Enter a name for this member.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {member} = await apiPost('/api/members', {name, contact, plan, startDate:start, amount});
+      state.members.push(mapMember(member));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add member'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderRenewMemberModal(modal){
+  const m = state.members.find(x=>x.id===state.modal.id);
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML = `<h2 style="font-size:16px;">Renew — ${escapeHtml(m.name)}</h2>`; head.appendChild(closeBtn()); modal.appendChild(head);
+  const info=document.createElement('div'); info.className='notice';
+  info.textContent = 'Current plan: ' + m.plan + '. Expires ' + fmtDate(m.expiryDate) + '.';
+  modal.appendChild(info);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field"><label>Plan</label><select id="r-plan">${Object.keys(PLAN_MONTHS).map(p=>`<option value="${p}" ${p===m.plan?'selected':''}>${p}</option>`).join('')}</select></div>
+      <div class="field"><label>Renewal date</label><input id="r-date" type="date" value="${todayStr()}"></div>
+      <div class="field"><label>Amount paid (PHP)</label><input id="r-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+      <div class="field" id="r-custom-wrap" style="display:none"><label>New expiry date</label><input id="r-custom-expiry" type="date"></div>
+    </div>
+    <div id="r-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const planSel = wrap.querySelector('#r-plan');
+  const customWrap = wrap.querySelector('#r-custom-wrap');
+  function syncCustom(){ customWrap.style.display = planSel.value==='Class pack' ? '' : 'none'; }
+  planSel.onchange = syncCustom; syncCustom();
+
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Confirm renewal';
+  b.onclick=async ()=>{
+    const plan=planSel.value;
+    const date=document.getElementById('r-date').value || todayStr();
+    const amount=parseFloat(document.getElementById('r-amount').value)||0;
+    const customExpiry=document.getElementById('r-custom-expiry').value;
+    const errEl=document.getElementById('r-error'); errEl.innerHTML='';
+    if(plan==='Class pack' && !customExpiry){ errEl.innerHTML='<div class="notice err">Set the new expiry date for this class pack.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {member} = await apiPost(`/api/members/${m.id}`, {plan, date, amount, customExpiry});
+      const mapped = mapMember(member);
+      Object.assign(m, mapped);
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Confirm renewal'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+// ============ PO TRACKER (reconciliation: PO + check payment + delivery receipt) ============
+function renderPoTracker(el){
+  const rows = state.requests.filter(r=>r.type==='PO' || r.type==='PettyCash').sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+
+  const totalPOs = rows.length;
+  const matched = rows.filter(r=>r.check && r.check.number && r.delivery && r.delivery.confirmedAt).length;
+  const missingCheck = rows.filter(r=>!( r.check && r.check.number) && r.status!=='Pending Approval' && r.status!=='Rejected').length;
+  const missingReceipt = rows.filter(r=>r.check && r.check.number && !(r.delivery && r.delivery.confirmedAt) && r.status!=='Rejected').length;
+  const openVariance = rows.filter(r=>r.delivery && r.delivery.varianceStatus==='Needs resolution').length;
+
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric good"><div class="num">${matched}</div><div class="lbl">Fully matched (PO + payment + receipt)</div></div>
+    <div class="metric ${missingCheck>0?'flag':''}"><div class="num">${missingCheck}</div><div class="lbl">Missing payment reference</div></div>
+    <div class="metric ${missingReceipt>0?'flag':''}"><div class="num">${missingReceipt}</div><div class="lbl">Paid, no receipt filed yet</div></div>
+    <div class="metric ${openVariance>0?'flag':''}"><div class="num">${openVariance}</div><div class="lbl">Payment variances unresolved</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const note = document.createElement('div'); note.className='notice';
+  note.textContent = 'This replaces the manual PO Tracker and Transmittal sheets — every row here is one request, and its payment reference, delivery receipt, and any amount variance are pulled straight from that request, so they can never drift out of sync.';
+  el.appendChild(note);
+
+  if(rows.length===0){ const e=document.createElement('div'); e.className='empty'; e.textContent='No requests yet.'; el.appendChild(e); return; }
+
+  const table = document.createElement('table'); table.className='simple';
+  table.innerHTML = `<thead><tr><th>PO / ref #</th><th>Branch</th><th>Supplier / payee</th><th style="text-align:right">Check amount</th><th>Payment ref</th><th>Receipt filed</th><th>Variance</th><th>POS</th></tr></thead>`;
+  const tbody = document.createElement('tbody');
+  rows.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.style.cursor = 'pointer';
+    tr.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
+    const paymentRef = r.check && r.check.number ? '#'+escapeHtml(r.check.number) : '—';
+    const checkAmt = (r.check && r.check.amount!=null) ? r.check.amount : r.amount;
+    const receiptOk = !!(r.delivery && r.delivery.confirmedAt);
+    const posOk = r.status==='Recorded in POS';
+    const posProof = posOk ? (r.pos && (r.pos.reference || r.pos.hasScreenshot)) : true;
+    let varianceCell = '<span class="badge neutral">—</span>';
+    if(r.delivery && r.delivery.varianceStatus==='Needs resolution') varianceCell = `<span class="badge flag">${fmtMoney(Math.abs(r.delivery.variance)).replace('PHP ','')} open</span>`;
+    else if(r.delivery && r.delivery.varianceStatus==='Resolved') varianceCell = '<span class="badge ok">Resolved</span>';
+    else if(r.delivery && r.delivery.varianceStatus==='Matched') varianceCell = '<span class="badge ok">Matched</span>';
+    tr.innerHTML = `
+      <td>${r.id}</td>
+      <td>${escapeHtml(r.branch||'—')}</td>
+      <td>${escapeHtml(r.supplier||r.payee)}</td>
+      <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(checkAmt).replace('PHP ','')}</td>
+      <td>${paymentRef}</td>
+      <td><span class="badge ${receiptOk?'ok':'neutral'}">${receiptOk?'Yes':'Pending'}</span></td>
+      <td>${varianceCell}</td>
+      <td><span class="badge ${posOk?'ok':'neutral'}">${posOk?(posProof?'Recorded':'No proof'):'Pending'}</span></td>
+    `;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  const tableCard = document.createElement('div'); tableCard.className='card';
+  const scrollWrap = document.createElement('div'); scrollWrap.style.cssText='overflow-x:auto;';
+  scrollWrap.appendChild(table);
+  tableCard.appendChild(scrollWrap);
+  el.appendChild(tableCard);
+}
+
+function renderStaffModal(modal){
+  const head=document.createElement('div'); head.className='modal-head';
+  head.innerHTML = '<h2 style="font-size:16px;">Staff directory</h2>';
+  head.appendChild(closeBtn()); modal.appendChild(head);
+
+  const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;margin-bottom:16px;';
+  const table = document.createElement('table'); table.className='simple'; table.style.minWidth='520px';
+  table.innerHTML = '<thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  state.staff.forEach(p=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${escapeHtml(p.name)}</td><td style="font-family:var(--font-m)">${escapeHtml(p.username||'—')}</td><td>${p.role}</td><td><span class="badge ${p.active!==false?'ok':'neutral'}">${p.active!==false?'Active':'Deactivated'}</span></td>`;
+    const td = document.createElement('td');
+    td.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
+    const resetBtn = document.createElement('button'); resetBtn.className='btn sm'; resetBtn.textContent='Reset password';
+    resetBtn.onclick = ()=>{ state.modal = {type:'resetPassword', id:p.id}; render(); };
+    const btn = document.createElement('button'); btn.className='btn sm'; btn.textContent = p.active!==false ? 'Deactivate' : 'Reactivate';
+    btn.onclick = async ()=>{
+      try{ const {active} = await apiPatch(`/api/staff/${p.id}`, {action:'toggle-active'}); p.active = active; state.modal={type:'staff'}; render(); }
+      catch(e){ alert(e.message); }
+    };
+    td.appendChild(resetBtn); td.appendChild(btn);
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  scroll.appendChild(table);
+  modal.appendChild(scroll);
+  modal.appendChild(divider());
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <h3 style="font-size:12px;color:var(--ink-2);margin-bottom:10px;letter-spacing:.03em;">Add new staff member</h3>
+    <div class="form-grid">
+      <div class="field full"><label>Full name</label><input id="staff-name" placeholder="e.g. Juan Dela Cruz"></div>
+      <div class="field"><label>Username</label><input id="staff-username" placeholder="e.g. juan"></div>
+      <div class="field"><label>Temporary password</label><input id="staff-password" type="text" placeholder="e.g. roshan123"></div>
+      <div class="field full"><label>Role</label><select id="staff-role">
+        <option value="Admin">Admin — admin dashboard only</option>
+        <option value="Supervisor">Supervisor — super admin (approvals)</option>
+        <option value="Owner">Owner — super admin (payments)</option>
+        <option value="Coach">Coach — coach dashboard only</option>
+      </select></div>
+    </div>
+    <div id="staff-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Add staff member';
+  b.onclick = async ()=>{
+    const name = document.getElementById('staff-name').value.trim();
+    const username = document.getElementById('staff-username').value.trim().toLowerCase();
+    const password = document.getElementById('staff-password').value;
+    const role = document.getElementById('staff-role').value;
+    const errEl = document.getElementById('staff-error'); errEl.innerHTML='';
+    if(!name){ errEl.innerHTML='<div class="notice err">Enter a name.</div>'; return; }
+    if(!username){ errEl.innerHTML='<div class="notice err">Enter a username.</div>'; return; }
+    if(!password || password.length<4){ errEl.innerHTML='<div class="notice err">Set a temporary password of at least 4 characters.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {staff} = await apiPost('/api/staff', {name, username, password, role});
+      state.staff.push(staff);
+      state.modal = {type:'staff'}; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add staff member'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderResetPasswordModal(modal){
+  const p = state.staff.find(s=>s.id===state.modal.id);
+  const head=document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<h2 style="font-size:16px;">Reset password — ${escapeHtml(p.name)}</h2>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+  const field = document.createElement('div'); field.className='field';
+  field.innerHTML = '<label>New temporary password</label><input id="reset-pw" type="text" placeholder="e.g. roshan123">';
+  modal.appendChild(field);
+  const errWrap = document.createElement('div'); errWrap.id='reset-error'; modal.appendChild(errWrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Set new password';
+  b.onclick = async ()=>{
+    const pw = document.getElementById('reset-pw').value;
+    const errEl = document.getElementById('reset-error');
+    if(!pw || pw.length<4){ errEl.innerHTML='<div class="notice err">Password must be at least 4 characters.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      await apiPatch(`/api/staff/${p.id}`, {action:'reset-password', password:pw});
+      state.modal = {type:'staff'}; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Set new password'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderChangePasswordModal(modal){
+  const head=document.createElement('div'); head.className='modal-head';
+  head.innerHTML = '<h2 style="font-size:16px;">Change password</h2>';
+  head.appendChild(closeBtn()); modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="field"><label>Current password</label><input id="cp-current" type="password"></div>
+    <div class="field"><label>New password</label><input id="cp-new" type="password"></div>
+    <div class="field"><label>Confirm new password</label><input id="cp-confirm" type="password"></div>
+    <div id="cp-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Update password';
+  b.onclick = async ()=>{
+    const currentPassword = document.getElementById('cp-current').value;
+    const newPassword = document.getElementById('cp-new').value;
+    const confirm = document.getElementById('cp-confirm').value;
+    const errEl = document.getElementById('cp-error'); errEl.innerHTML='';
+    if(!newPassword || newPassword.length<4){ errEl.innerHTML='<div class="notice err">New password must be at least 4 characters.</div>'; return; }
+    if(newPassword !== confirm){ errEl.innerHTML='<div class="notice err">New passwords do not match.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      await apiPost('/api/me/password', {currentPassword, newPassword});
+      state.modal = null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Update password'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderPricelistModal(modal){
+  const head=document.createElement('div'); head.className='modal-head';
+  head.innerHTML = '<h2 style="font-size:16px;">Manage pricelist</h2>';
+  head.appendChild(closeBtn()); modal.appendChild(head);
+
+  const note = document.createElement('div'); note.className='hint'; note.style.marginBottom='14px';
+  note.textContent = 'Edit a price and it saves automatically. These prices auto-fill new purchase orders, but can always be overridden per order.';
+  modal.appendChild(note);
+
+  const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;margin-bottom:16px;max-height:360px;overflow-y:auto;';
+  const table = document.createElement('table'); table.className='simple'; table.style.minWidth='480px';
+  table.innerHTML = '<thead><tr><th>Item</th><th>Supplier</th><th>Unit cost</th><th></th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  const activeProducts = state.products.filter(p=>p.active!==false).sort((a,b)=>a.item.localeCompare(b.item));
+  activeProducts.forEach(p=>{
+    const supNames = (p.supplierKeys||[]).map(k=>{ const s=SUPPLIERS.find(x=>x.key===k); return s?s.name:k; }).join(', ') || 'Any supplier';
+    const tr = document.createElement('tr');
+    const costCell = document.createElement('td');
+    const costInput = document.createElement('input');
+    costInput.type='number'; costInput.min='0'; costInput.step='0.01'; costInput.value=p.cost;
+    costInput.style.cssText = 'background:var(--bg-2);border:1px solid var(--line);border-radius:6px;color:var(--ink-0);padding:6px 8px;font-size:12.5px;width:90px;';
+    costInput.onchange = async ()=>{ const cost = parseFloat(costInput.value)||0; try{ const {product}=await apiPatch(`/api/products/${p.id}`, {cost}); Object.assign(p, mapProduct(product)); }catch(e){ alert(e.message); } };
+    costCell.appendChild(costInput);
+    tr.innerHTML = `<td>${escapeHtml(p.item)}</td><td style="font-size:12px;color:var(--ink-2);">${escapeHtml(supNames)}</td>`;
+    tr.appendChild(costCell);
+    const actCell = document.createElement('td');
+    const rmBtn = document.createElement('button'); rmBtn.className='btn sm'; rmBtn.textContent='Remove';
+    rmBtn.onclick = async ()=>{ try{ await apiPatch(`/api/products/${p.id}`, {active:false}); p.active=false; state.modal={type:'pricelist'}; render(); }catch(e){ alert(e.message); } };
+    actCell.appendChild(rmBtn);
+    tr.appendChild(actCell);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  scroll.appendChild(table);
+  modal.appendChild(scroll);
+  modal.appendChild(divider());
+
+  const addWrap = document.createElement('div');
+  addWrap.innerHTML = `
+    <h3 style="font-size:12px;color:var(--ink-2);margin-bottom:10px;letter-spacing:.03em;">Add new product</h3>
+    <div class="form-grid">
+      <div class="field full"><label>Item name</label><input id="np-item" placeholder="e.g. Vitamilk 1L"></div>
+      <div class="field"><label>Unit cost (PHP)</label><input id="np-cost" type="number" min="0" step="0.01" placeholder="0.00"></div>
+      <div class="field"><label>Supplier</label><select id="np-supplier"><option value="">Any supplier</option>${SUPPLIERS.map(s=>`<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('')}</select></div>
+    </div>
+    <div id="np-error"></div>
+  `;
+  modal.appendChild(addWrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Add product';
+  b.onclick = async ()=>{
+    const item = document.getElementById('np-item').value.trim();
+    const cost = parseFloat(document.getElementById('np-cost').value);
+    const supKey = document.getElementById('np-supplier').value;
+    const errEl = document.getElementById('np-error'); errEl.innerHTML='';
+    if(!item || !cost || cost<=0){ errEl.innerHTML='<div class="notice err">Enter an item name and a valid cost.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {product} = await apiPost('/api/products', {item, cost, supplierKeys: supKey ? [supKey] : []});
+      state.products.push(mapProduct(product));
+      state.modal = {type:'pricelist'}; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add product'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderSuppliersModal(modal){
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Suppliers directory</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;';
+  const table = document.createElement('table'); table.className='simple'; table.style.minWidth='560px';
+  table.innerHTML = `<thead><tr><th>Supplier</th><th>Contact</th><th>Phone</th><th>Check payable to</th><th>Usually orders</th></tr></thead>` +
+    '<tbody>' + SUPPLIERS.map(s=>`<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.contact||'—')}</td><td>${escapeHtml(s.phone||'—')}</td><td>${escapeHtml(s.payTo)}</td><td>${escapeHtml(s.items)}</td></tr>`).join('') + '</tbody>';
+  scroll.appendChild(table);
+  modal.appendChild(scroll);
+}
+
+// ============ REPOSITORY ============
+function renderRepository(el){
+  const search = document.createElement('div');
+  search.style.marginBottom = '16px';
+  search.innerHTML = `<input id="repo-search" placeholder="Search by request ID, title, or payee" style="width:100%;background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:10px 12px;font-size:13.5px;">`;
+  el.appendChild(search);
+  search.querySelector('#repo-search').value = state.search;
+  search.querySelector('#repo-search').oninput = (e)=>{ state.search = e.target.value; renderRepoGrid(); };
+  const grid = document.createElement('div'); grid.className='repo-grid'; grid.id='repo-grid';
+  el.appendChild(grid);
+  renderRepoGrid();
+}
+
+function renderRepoGrid(){
+  const grid = document.getElementById('repo-grid'); if(!grid) return;
+  grid.innerHTML = '';
+  const q = state.search.toLowerCase();
+  const filtered = state.requests.filter(r=> !q || r.id.toLowerCase().includes(q) || r.title.toLowerCase().includes(q) || r.payee.toLowerCase().includes(q));
+  if(filtered.length===0){ grid.innerHTML='<div class="empty">No requests match that search.</div>'; return; }
+  filtered.forEach(r=>{
+    const totalFiles = (r.attachments||[]).length;
+    const c=document.createElement('div'); c.className='repo-card';
+    c.innerHTML = `
+      <span class="badge ${r.type==='PO'?'po':'pc'}">${r.type==='PO'?'PO':'Petty cash'}</span>
+      <div class="req-title" style="font-size:13.5px;margin-top:6px;">${escapeHtml(r.title)}</div>
+      <div class="req-sub">${escapeHtml(r.payee)} &middot; ${fmtMoney(r.amount)}</div>
+      <div class="hint" style="margin-top:8px;">${totalFiles} file${totalFiles===1?'':'s'} attached</div>
+    `;
+    const btn=document.createElement('button'); btn.className='btn ghost'; btn.style.cssText='padding:6px 0;margin-top:6px;'; btn.textContent='Open request →';
+    btn.onclick=()=>{ state.modal={type:'detail', id:r.id}; render(); };
+    c.appendChild(btn); grid.appendChild(c);
+  });
+}
+
+// ============ MODAL ROUTER ============
+function renderModal(){
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = '';
+  if(!state.modal) return;
+  const overlay = document.createElement('div'); overlay.className='overlay';
+  overlay.onclick = (e)=>{ if(e.target===overlay){ state.modal=null; render(); } };
+  const modal = document.createElement('div'); modal.className='modal';
+  overlay.appendChild(modal); root.appendChild(overlay);
+
+  if(state.modal.type==='detail') return renderDetailModal(modal);
+  if(state.modal.type==='reject') return renderRejectModal(modal);
+  if(state.modal.type==='check') return renderCheckModal(modal);
+  if(state.modal.type==='delivery') return renderDeliveryModal(modal);
+  if(state.modal.type==='pos') return renderPosModal(modal);
+  if(state.modal.type==='variance') return renderVarianceModal(modal);
+  if(state.modal.type==='newRequest') return renderNewRequestModal(modal, state.modal.reqType);
+  if(state.modal.type==='suppliers') return renderSuppliersModal(modal);
+  if(state.modal.type==='pricelist') return renderPricelistModal(modal);
+  if(state.modal.type==='staff') return renderStaffModal(modal);
+  if(state.modal.type==='resetPassword') return renderResetPasswordModal(modal);
+  if(state.modal.type==='changePassword') return renderChangePasswordModal(modal);
+  if(state.modal.type==='newTask') return renderNewTaskModal(modal);
+  if(state.modal.type==='newSale') return renderNewSaleModal(modal);
+  if(state.modal.type==='newMember') return renderNewMemberModal(modal);
+  if(state.modal.type==='renewMember') return renderRenewMemberModal(modal);
+}
+
+loadAll();
