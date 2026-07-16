@@ -3,6 +3,8 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { requireSession, requireRole, SUPER_ADMIN_ROLES } from '../../../lib/auth';
 import { withApi, ok } from '../../../lib/api';
 
+export const dynamic = 'force-dynamic';
+
 export const GET = withApi(async () => {
   const session = requireSession();
   requireRole(session, SUPER_ADMIN_ROLES);

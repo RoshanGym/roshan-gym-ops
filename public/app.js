@@ -92,6 +92,12 @@ async function apiPost(path, body){
   if(!res.ok) throw new Error(data.error || 'Something went wrong.');
   return data;
 }
+async function apiDelete(path){
+  const res = await fetch(path, {method:'DELETE'});
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+  return data;
+}
 async function apiPatch(path, body){
   const res = await fetch(path, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
   const data = await res.json().catch(()=>({}));
@@ -119,6 +125,7 @@ function mapRequest(r){
     lineItems:r.line_items||[], status:r.status, createdBy:r.created_by, createdAt:r.created_at,
     approval:r.approval||{}, check:r.check_info||{}, receipt:r.receipt||{}, handover:r.handover||{},
     delivery:r.delivery||{}, pos:r.pos||{}, history:r.history||[],
+    deletedAt:r.deleted_at||null, deletedBy:r.deleted_by||null,
     attachments:(r.attachments||[]).map(a=>({id:a.id, name:a.name, mime:a.mime, label:a.label, uploadedBy:a.uploaded_by, uploadedAt:a.uploaded_at})),
   };
 }
@@ -166,6 +173,8 @@ async function refreshStaff(){
 }
 
 function findReq(id){ return state.requests.find(r=>r.id===id); }
+function activeRequests(){ return state.requests.filter(r=>!r.deletedAt); }
+function deletedRequests(){ return state.requests.filter(r=>r.deletedAt); }
 
 // ---------- RENDER SHELL ----------
 function render(){
@@ -438,7 +447,7 @@ function renderNewTaskModal(modal){
 
 // ============ PURCHASE ORDERS / PETTY CASH (shared engine) ============
 function computeReqMetrics(type){
-  const reqs = state.requests.filter(r=>r.type===type);
+  const reqs = activeRequests().filter(r=>r.type===type);
   const pendingApproval = reqs.filter(r=>r.status==='Pending Approval').length;
   const awaitingCheck = reqs.filter(r=>r.status==='Approved').length;
   const outstanding = reqs.filter(r=>r.status!=='Recorded in POS' && r.status!=='Rejected').reduce((s,r)=>s+Number(r.amount||0),0);
@@ -469,6 +478,12 @@ function renderRequestsSection(el, type){
     priceBtn.onclick = ()=>{ state.modal = {type:'pricelist'}; render(); };
     btnGroup.appendChild(priceBtn);
   }
+  const exportBtn = document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
+  exportBtn.onclick = ()=>{
+    const list = activeRequests().filter(r=>r.type===type).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+    exportRequestsToExcel(list, type==='PO'?'Purchase Orders':'Petty Cash', type==='PO'?'roshan-purchase-orders':'roshan-petty-cash');
+  };
+  btnGroup.appendChild(exportBtn);
   if(curRole()==='Admin'){
     const b = document.createElement('button'); b.className='btn primary';
     b.textContent = type==='PO' ? '+ New purchase order' : '+ New reimbursement';
@@ -478,7 +493,7 @@ function renderRequestsSection(el, type){
   head.appendChild(btnGroup);
   el.appendChild(head);
 
-  const list = state.requests.filter(r=>r.type===type).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  const list = activeRequests().filter(r=>r.type===type).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
   if(list.length===0){
     const e = document.createElement('div'); e.className='empty';
     e.textContent = type==='PO' ? 'No purchase orders yet.' : 'No reimbursement requests yet.';
@@ -534,6 +549,13 @@ function renderReqCard(r){
 
 function actionsFor(r){
   const acts = [];
+  if(r.deletedAt){
+    if(accessTier(curRole())==='SuperAdmin'){
+      acts.push({label:'Restore', variant:'primary', onClick:(r)=>restoreReq(r)});
+      acts.push({label:'Delete permanently', variant:'danger', onClick:(r)=>purgeReq(r)});
+    }
+    return acts;
+  }
   if(curRole()==='Supervisor' && r.status==='Pending Approval'){
     acts.push({label:'Approve', variant:'primary', onClick:(r)=>approveReq(r.id)});
     acts.push({label:'Reject', variant:'danger', onClick:(r)=>{ state.modal={type:'reject', id:r.id}; render(); }});
@@ -559,7 +581,47 @@ function actionsFor(r){
   if(curRole()==='Admin' && r.status==='Rejected'){
     acts.push({label:'Resubmit for approval', onClick:(r)=>resubmit(r.id)});
   }
+  if(accessTier(curRole())==='SuperAdmin'){
+    acts.push({label:'Delete', variant:'danger', onClick:(r)=>deleteReq(r)});
+  }
   return acts;
+}
+
+async function deleteReq(r){
+  const okGo = confirm(
+    'Delete ' + r.id + ' (' + r.title + ')?\n\n' +
+    'It will be moved to Deleted items — hidden from all views and reports, ' +
+    'but reviewable and restorable by Super Admins from the PO Tracker.'
+  );
+  if(!okGo) return;
+  try{
+    const {request} = await apiDelete(`/api/requests/${r.id}`);
+    upsertRequest(mapRequest(request));
+    if(state.modal && state.modal.id===r.id) state.modal = null;
+    render();
+  }catch(e){ alert(e.message); }
+}
+
+async function restoreReq(r){
+  try{
+    const {request} = await apiPost(`/api/requests/${r.id}`, {action:'restore'});
+    upsertRequest(mapRequest(request));
+    render();
+  }catch(e){ alert(e.message); }
+}
+
+async function purgeReq(r){
+  const typed = prompt(
+    'PERMANENTLY delete ' + r.id + ' (' + r.title + ')? This erases the record, ' +
+    'its history, and all its files forever. This cannot be undone.\n\nType DELETE to confirm:'
+  );
+  if(typed !== 'DELETE'){ if(typed !== null) alert('Not deleted — you must type DELETE exactly.'); return; }
+  try{
+    await apiPost(`/api/requests/${r.id}`, {action:'purge'});
+    state.requests = state.requests.filter(x=>x.id!==r.id);
+    if(state.modal && state.modal.id===r.id) state.modal = null;
+    render();
+  }catch(e){ alert(e.message); }
 }
 
 async function approveReq(id){
@@ -783,6 +845,11 @@ function renderDetailModal(modal){
     <div class="req-sub" style="margin-top:4px;">${r.id}${r.branch?' &middot; '+escapeHtml(r.branch):''} &middot; ${escapeHtml(r.supplier||r.payee)} &middot; ${fmtMoney(r.amount)}</div>
   </div>`;
   head.appendChild(closeBtn()); modal.appendChild(head);
+  if(r.deletedAt){
+    const delBanner = document.createElement('div'); delBanner.className='notice err';
+    delBanner.textContent = 'This request was deleted by ' + (r.deletedBy||'—') + ' on ' + fmtDateTime(r.deletedAt) + '. It is hidden from all views and reports. Super Admins can restore it or delete it permanently.';
+    modal.appendChild(delBanner);
+  }
   if(r.payee || r.paymentMethod || r.requestor){
     const meta = document.createElement('div');
     meta.style.cssText = 'font-size:12.5px;color:var(--ink-2);margin-bottom:12px;';
@@ -1291,8 +1358,49 @@ function renderRenewMemberModal(modal){
 }
 
 // ============ PO TRACKER (reconciliation: PO + check payment + delivery receipt) ============
+function requestToExportRow(r){
+  const checkAmt = (r.check && r.check.amount!=null) ? Number(r.check.amount) : Number(r.amount||0);
+  return {
+    'Reference #': r.id,
+    'Type': r.type==='PO' ? 'Purchase order' : 'Petty cash',
+    'Branch': r.branch || '',
+    'Supplier / payee': r.supplier || r.payee || '',
+    'Check payable to': r.payee || '',
+    'Description': r.title || '',
+    'Requested by': r.requestor || r.createdBy || '',
+    'Date requested': r.createdAt ? r.createdAt.slice(0,10) : '',
+    'Status': r.status,
+    'Approved by': (r.approval && r.approval.approvedBy) || '',
+    'PO amount (PHP)': Number(r.amount||0),
+    'Payment method': r.paymentMethod || '',
+    'Check / payment ref': (r.check && r.check.number) || '',
+    'Payment date': (r.check && r.check.date) || '',
+    'Check amount (PHP)': (r.check && r.check.number) ? checkAmt : '',
+    'Delivery amount (PHP)': (r.delivery && r.delivery.deliveredAmount!=null) ? Number(r.delivery.deliveredAmount) : '',
+    'Variance (PHP)': (r.delivery && r.delivery.variance) ? Number(r.delivery.variance) : '',
+    'Variance status': (r.delivery && r.delivery.varianceStatus) || '',
+    'POS reference': (r.pos && r.pos.reference) || '',
+    'POS screenshot on file': (r.pos && r.pos.hasScreenshot) ? 'Yes' : '',
+    'Files attached': (r.attachments||[]).length,
+    'Notes': r.notes || '',
+  };
+}
+
+function exportRequestsToExcel(rows, sheetName, filePrefix){
+  if(typeof XLSX === 'undefined'){ alert('The Excel library did not load. Check your internet connection and refresh the page.'); return; }
+  if(!rows.length){ alert('Nothing to export yet.'); return; }
+  const data = rows.map(requestToExportRow);
+  const ws = XLSX.utils.json_to_sheet(data);
+  // reasonable column widths
+  ws['!cols'] = Object.keys(data[0]).map(k=>({wch: Math.max(k.length+2, 14)}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0,31));
+  const today = new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb, `${filePrefix}-${today}.xlsx`);
+}
+
 function renderPoTracker(el){
-  const rows = state.requests.filter(r=>r.type==='PO' || r.type==='PettyCash').sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  const rows = activeRequests().filter(r=>r.type==='PO' || r.type==='PettyCash').sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
 
   const totalPOs = rows.length;
   const matched = rows.filter(r=>r.check && r.check.number && r.delivery && r.delivery.confirmedAt).length;
@@ -1312,6 +1420,13 @@ function renderPoTracker(el){
   const note = document.createElement('div'); note.className='notice';
   note.textContent = 'This replaces the manual PO Tracker and Transmittal sheets — every row here is one request, and its payment reference, delivery receipt, and any amount variance are pulled straight from that request, so they can never drift out of sync.';
   el.appendChild(note);
+
+  const trackerHead = document.createElement('div'); trackerHead.className='section-head';
+  trackerHead.innerHTML = '<h2>All requests</h2>';
+  const exportBtn = document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
+  exportBtn.onclick = ()=>exportRequestsToExcel(rows, 'PO Tracker', 'roshan-po-tracker');
+  trackerHead.appendChild(exportBtn);
+  el.appendChild(trackerHead);
 
   if(rows.length===0){ const e=document.createElement('div'); e.className='empty'; e.textContent='No requests yet.'; el.appendChild(e); return; }
 
@@ -1349,6 +1464,50 @@ function renderPoTracker(el){
   scrollWrap.appendChild(table);
   tableCard.appendChild(scrollWrap);
   el.appendChild(tableCard);
+
+  // ---- Deleted items (Super Admin only) ----
+  if(accessTier(curRole())==='SuperAdmin'){
+    const deleted = deletedRequests().sort((a,b)=> new Date(b.deletedAt)-new Date(a.deletedAt));
+    const dHead = document.createElement('div'); dHead.className='section-head'; dHead.style.marginTop='26px';
+    dHead.innerHTML = `<h2>Deleted items (${deleted.length})</h2>`;
+    el.appendChild(dHead);
+    if(deleted.length===0){
+      const e=document.createElement('div'); e.className='hint'; e.textContent='Nothing deleted. When a request is deleted, it appears here with who deleted it and when, and can be restored or permanently removed.';
+      el.appendChild(e);
+    } else {
+      const dCard = document.createElement('div'); dCard.className='card';
+      const dScroll = document.createElement('div'); dScroll.style.cssText='overflow-x:auto;';
+      const dTable = document.createElement('table'); dTable.className='simple';
+      dTable.innerHTML = '<thead><tr><th>Reference #</th><th>Description</th><th>Supplier / payee</th><th style="text-align:right">Amount</th><th>Deleted by</th><th>Deleted on</th><th></th></tr></thead>';
+      const dBody = document.createElement('tbody');
+      deleted.forEach(r=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.id}</td>
+          <td>${escapeHtml(r.title)}</td>
+          <td>${escapeHtml(r.supplier||r.payee)}</td>
+          <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(r.amount).replace('PHP ','')}</td>
+          <td>${escapeHtml(r.deletedBy||'—')}</td>
+          <td>${fmtDateTime(r.deletedAt)}</td>
+        `;
+        const td = document.createElement('td');
+        td.style.cssText='display:flex;gap:6px;flex-wrap:wrap;';
+        const viewBtn = document.createElement('button'); viewBtn.className='btn sm ghost'; viewBtn.textContent='View';
+        viewBtn.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
+        const restoreBtn = document.createElement('button'); restoreBtn.className='btn sm primary'; restoreBtn.textContent='Restore';
+        restoreBtn.onclick = ()=>restoreReq(r);
+        const purgeBtn = document.createElement('button'); purgeBtn.className='btn sm danger'; purgeBtn.textContent='Delete permanently';
+        purgeBtn.onclick = ()=>purgeReq(r);
+        td.appendChild(viewBtn); td.appendChild(restoreBtn); td.appendChild(purgeBtn);
+        tr.appendChild(td);
+        dBody.appendChild(tr);
+      });
+      dTable.appendChild(dBody);
+      dScroll.appendChild(dTable);
+      dCard.appendChild(dScroll);
+      el.appendChild(dCard);
+    }
+  }
 }
 
 function renderStaffModal(modal){
@@ -1566,7 +1725,7 @@ function renderRepoGrid(){
   const grid = document.getElementById('repo-grid'); if(!grid) return;
   grid.innerHTML = '';
   const q = state.search.toLowerCase();
-  const filtered = state.requests.filter(r=> !q || r.id.toLowerCase().includes(q) || r.title.toLowerCase().includes(q) || r.payee.toLowerCase().includes(q));
+  const filtered = activeRequests().filter(r=> !q || r.id.toLowerCase().includes(q) || r.title.toLowerCase().includes(q) || r.payee.toLowerCase().includes(q));
   if(filtered.length===0){ grid.innerHTML='<div class="empty">No requests match that search.</div>'; return; }
   filtered.forEach(r=>{
     const totalFiles = (r.attachments||[]).length;

@@ -55,7 +55,9 @@ create table if not exists requests (
   handover jsonb not null default '{}',
   delivery jsonb not null default '{}',
   pos jsonb not null default '{}',
-  history jsonb not null default '[]'
+  history jsonb not null default '[]',
+  deleted_at timestamptz,
+  deleted_by text
 );
 
 create table if not exists attachments (

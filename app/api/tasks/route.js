@@ -3,6 +3,8 @@ import { requireSession } from '../../../lib/auth';
 import { newSimpleId } from '../../../lib/ids';
 import { withApi, ok } from '../../../lib/api';
 
+export const dynamic = 'force-dynamic';
+
 export const GET = withApi(async () => {
   requireSession();
   const db = supabaseAdmin();

@@ -2,13 +2,18 @@ import { supabaseAdmin } from '../../../lib/supabase';
 import { requireSession, tierFor } from '../../../lib/auth';
 import { withApi, ok } from '../../../lib/api';
 
+export const dynamic = 'force-dynamic';
+
 export const GET = withApi(async () => {
   const session = requireSession();
   const db = supabaseAdmin();
   const tier = tierFor(session.role);
 
+  let requestsQuery = db.from('requests').select('*, attachments(*)').order('created_at', { ascending: false });
+  if (tier !== 'SuperAdmin') requestsQuery = requestsQuery.is('deleted_at', null);
+
   const [requests, tasks, sales, members, products] = await Promise.all([
-    db.from('requests').select('*, attachments(*)').order('created_at', { ascending: false }),
+    requestsQuery,
     db.from('tasks').select('*').order('date', { ascending: false }),
     db.from('sales').select('*').order('date', { ascending: false }),
     db.from('members').select('*').order('expiry_date'),

@@ -3,6 +3,8 @@ import { requireSession } from '../../../lib/auth';
 import { newSimpleId } from '../../../lib/ids';
 import { withApi, ok } from '../../../lib/api';
 
+export const dynamic = 'force-dynamic';
+
 const PLAN_MONTHS = { Monthly: 1, Quarterly: 3, Annual: 12, 'Class pack': 0 };
 
 export const GET = withApi(async () => {

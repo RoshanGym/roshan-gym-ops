@@ -3,6 +3,8 @@ import { supabaseAdmin } from '../../../../lib/supabase';
 import { requireSession } from '../../../../lib/auth';
 import { withApi } from '../../../../lib/api';
 
+export const dynamic = 'force-dynamic';
+
 export const GET = withApi(async (req, { params }) => {
   requireSession();
   const db = supabaseAdmin();
