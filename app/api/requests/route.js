@@ -1,95 +1,99 @@
 import { supabaseAdmin } from '../../../lib/supabase';
-import { requireSession, requireRole, SUPER_ADMIN_ROLES } from '../../../../lib/auth';
-import { withApi, ok } from '../../../../lib/api';
+import { requireSession, tierFor } from '../../../lib/auth';
+import { newRequestId } from '../../../lib/ids';
+import { withApi, ok } from '../../../lib/api';
 
 export const dynamic = 'force-dynamic';
 
 function nowIso() { return new Date().toISOString(); }
 
-async function loadRequest(db, id) {
-  const { data, error } = await db.from('requests').select('*').eq('id', id).single();
-  if (error) {
-    const err = new Error('Request not found.');
-    err.status = 404;
-    throw err;
-  }
-  return data;
-}
-
-// SOFT DELETE. The record stays in the database, marked deleted with who/when,
-// and a line is added to its history. It disappears from all normal views but
-// remains reviewable and restorable by Super Admins from the PO Tracker.
-export const DELETE = withApi(async (req, { params }) => {
+export const GET = withApi(async () => {
   const session = requireSession();
-  requireRole(session, SUPER_ADMIN_ROLES);
   const db = supabaseAdmin();
-  const r = await loadRequest(db, params.id);
-  if (r.deleted_at) {
-    const err = new Error('This request is already deleted.');
-    err.status = 400;
-    throw err;
-  }
-  const history = Array.isArray(r.history) ? r.history : [];
-  history.push({ at: nowIso(), text: 'Request deleted (moved to deleted items — restorable)', by: session.name, role: session.role });
-  const { data, error } = await db
+  let query = db
     .from('requests')
-    .update({ deleted_at: nowIso(), deleted_by: session.name, history })
-    .eq('id', params.id)
     .select('*, attachments(*)')
-    .single();
+    .order('created_at', { ascending: false });
+  if (tierFor(session.role) !== 'SuperAdmin') query = query.is('deleted_at', null);
+  const { data, error } = await query;
   if (error) throw error;
-  return ok({ request: data });
+  return ok({ requests: data });
 });
 
-// RESTORE (action: 'restore') and PERMANENT PURGE (action: 'purge').
-// Purge only works on a request that is already soft-deleted, so permanent
-// removal is always a deliberate two-step act, never a single click.
-export const POST = withApi(async (req, { params }) => {
+export const POST = withApi(async (req) => {
   const session = requireSession();
-  requireRole(session, SUPER_ADMIN_ROLES);
+  if (session.role !== 'Admin') {
+    const err = new Error('Only Admin accounts create requests.');
+    err.status = 403;
+    throw err;
+  }
+  const body = await req.json();
   const db = supabaseAdmin();
-  const { action } = await req.json();
-  const r = await loadRequest(db, params.id);
 
-  if (action === 'restore') {
-    if (!r.deleted_at) {
-      const err = new Error('This request is not deleted.');
+  if (body.type === 'PO') {
+    const { branch, supplier, payee, lineItems, notes } = body;
+    const validRows = (lineItems || []).filter((r) => r.item && r.item.trim() && r.qty > 0);
+    const amount = validRows.reduce((s, r) => s + r.qty * r.cost, 0);
+    if (!supplier || !payee || validRows.length === 0 || amount <= 0) {
+      const err = new Error('Supplier, payee, and at least one valid line item are required.');
       err.status = 400;
       throw err;
     }
-    const history = Array.isArray(r.history) ? r.history : [];
-    history.push({ at: nowIso(), text: 'Request restored from deleted items', by: session.name, role: session.role });
-    const { data, error } = await db
-      .from('requests')
-      .update({ deleted_at: null, deleted_by: null, history })
-      .eq('id', params.id)
-      .select('*, attachments(*)')
-      .single();
+    const id = await newRequestId('PO', branch);
+    const title =
+      validRows.map((r) => r.item).slice(0, 2).join(', ') +
+      (validRows.length > 2 ? ` +${validRows.length - 2} more` : '');
+    const record = {
+      id,
+      type: 'PO',
+      title,
+      payee,
+      amount,
+      notes: notes || '',
+      branch,
+      supplier,
+      payment_method: 'Check',
+      requestor: session.name,
+      line_items: validRows.map((r) => ({ item: r.item, qty: r.qty, cost: r.cost, total: r.qty * r.cost })),
+      status: 'Pending Approval',
+      created_by: session.name,
+      created_by_id: session.id,
+      history: [{ at: nowIso(), text: 'Request created and sent for approval', by: session.name, role: session.role }],
+    };
+    const { data, error } = await db.from('requests').insert(record).select('*, attachments(*)').single();
     if (error) throw error;
     return ok({ request: data });
   }
 
-  if (action === 'purge') {
-    if (!r.deleted_at) {
-      const err = new Error('Only requests already in deleted items can be permanently removed. Delete it first.');
+  if (body.type === 'PettyCash') {
+    const { title, payee, amount, notes } = body;
+    if (!title || !payee || !amount || amount <= 0) {
+      const err = new Error('Fill in what this is for, the payee, and a valid amount.');
       err.status = 400;
       throw err;
     }
-    const { data: atts, error: attErr } = await db
-      .from('attachments')
-      .select('storage_path')
-      .eq('request_id', params.id);
-    if (attErr) throw attErr;
-    if (atts && atts.length) {
-      const paths = atts.map((a) => a.storage_path).filter(Boolean);
-      if (paths.length) await db.storage.from('attachments').remove(paths);
-    }
-    const { error } = await db.from('requests').delete().eq('id', params.id);
+    const id = await newRequestId('PettyCash');
+    const record = {
+      id,
+      type: 'PettyCash',
+      title,
+      payee,
+      amount,
+      notes: notes || '',
+      payment_method: 'Cash',
+      requestor: session.name,
+      line_items: [],
+      status: 'Pending Approval',
+      created_by: session.name,
+      created_by_id: session.id,
+      history: [{ at: nowIso(), text: 'Request created and sent for approval', by: session.name, role: session.role }],
+    };
+    const { data, error } = await db.from('requests').insert(record).select('*, attachments(*)').single();
     if (error) throw error;
-    return ok({ success: true, purged: params.id });
+    return ok({ request: data });
   }
 
-  const err = new Error('Unknown action.');
+  const err = new Error('Unknown request type.');
   err.status = 400;
   throw err;
 });
