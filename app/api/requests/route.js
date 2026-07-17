@@ -14,7 +14,9 @@ export const GET = withApi(async () => {
     .from('requests')
     .select('*, attachments(*)')
     .order('created_at', { ascending: false });
-  if (tierFor(session.role) !== 'SuperAdmin') query = query.is('deleted_at', null);
+  if (tierFor(session.role) !== 'SuperAdmin') {
+    query = query.is('deleted_at', null).eq('created_by_id', session.id);
+  }
   const { data, error } = await query;
   if (error) throw error;
   return ok({ requests: data });

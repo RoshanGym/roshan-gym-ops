@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../../../../../lib/supabase';
-import { requireSession } from '../../../../../lib/auth';
+import { requireSession, tierFor } from '../../../../../lib/auth';
 import { withApi, ok } from '../../../../../lib/api';
 
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -22,10 +22,15 @@ export const POST = withApi(async (req, { params }) => {
     throw err;
   }
 
-  const { data: reqRow, error: reqErr } = await db.from('requests').select('id, history').eq('id', params.id).single();
+  const { data: reqRow, error: reqErr } = await db.from('requests').select('id, history, created_by_id').eq('id', params.id).single();
   if (reqErr) {
     const err = new Error('Request not found.');
     err.status = 404;
+    throw err;
+  }
+  if (tierFor(session.role) !== 'SuperAdmin' && reqRow.created_by_id && reqRow.created_by_id !== session.id) {
+    const err = new Error('You can only attach files to your own requests.');
+    err.status = 403;
     throw err;
   }
 

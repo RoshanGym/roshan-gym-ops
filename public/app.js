@@ -506,11 +506,18 @@ function renderTasks(el){
   });
   el.appendChild(tabs);
 
-  if(state.tasksTab==='adhoc') return renderAdhocTasks(el);
-  if(state.tasksTab==='templates') return renderTemplatesView(el);
-  if(state.tasksTab==='team') return renderTeamOverview(el);
-  if(state.tasksTab==='summary') return renderMySummary(el);
-  return renderChecklistView(el);
+  const body = document.createElement('div');
+  el.appendChild(body);
+  try{
+    if(state.tasksTab==='adhoc') return renderAdhocTasks(body);
+    if(state.tasksTab==='templates') return renderTemplatesView(body);
+    if(state.tasksTab==='team') return renderTeamOverview(body);
+    if(state.tasksTab==='summary') return renderMySummary(body);
+    return renderChecklistView(body);
+  }catch(err){
+    console.error('Tasks view error:', err);
+    body.innerHTML = '<div class="empty">Could not load this view. Try another tab, or refresh the page.</div>';
+  }
 }
 
 function checklistPct(entries, freq){

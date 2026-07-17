@@ -10,7 +10,10 @@ export const GET = withApi(async () => {
   const tier = tierFor(session.role);
 
   let requestsQuery = db.from('requests').select('*, attachments(*)').order('created_at', { ascending: false });
-  if (tier !== 'SuperAdmin') requestsQuery = requestsQuery.is('deleted_at', null);
+  if (tier !== 'SuperAdmin') {
+    // Admins see only their own requests; Super Admins see everything.
+    requestsQuery = requestsQuery.is('deleted_at', null).eq('created_by_id', session.id);
+  }
 
   const [requests, tasks, sales, members, products] = await Promise.all([
     requestsQuery,

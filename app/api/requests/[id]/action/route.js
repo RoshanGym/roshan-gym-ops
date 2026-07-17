@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../../../../../lib/supabase';
-import { requireSession, requireRole } from '../../../../../lib/auth';
+import { requireSession, requireRole, tierFor } from '../../../../../lib/auth';
 import { withApi, ok } from '../../../../../lib/api';
 
 function nowIso() { return new Date().toISOString(); }
@@ -27,6 +27,15 @@ export const POST = withApi(async (req, { params }) => {
   const body = await req.json();
   const action = body.action;
   const r = await loadRequest(db, params.id);
+
+  // Privacy: an Admin can only act on requests they created. Super Admins
+  // (Supervisor/Owner) act on any request as the workflow requires.
+  if (tierFor(session.role) !== 'SuperAdmin' && r.created_by_id && r.created_by_id !== session.id) {
+    const err = new Error('You can only act on your own requests.');
+    err.status = 403;
+    throw err;
+  }
+
   const history = Array.isArray(r.history) ? r.history : [];
   const log = (text) => history.push({ at: nowIso(), text, by: session.name, role: session.role });
 
