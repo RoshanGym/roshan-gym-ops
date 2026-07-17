@@ -1,6 +1,6 @@
 
 const SECTIONS = [
-  {key:'tasks', label:'Daily tasks', sub:'Track what admin staff completed today.'},
+  {key:'tasks', label:'Daily tasks', sub:'Daily & weekly checklists, proof, and completion tracking.'},
   {key:'po', label:'Purchase orders', sub:'Order merchandise and supplies, tracked end to end.'},
   {key:'pettycash', label:'Petty cash', sub:'Reimbursements for staff, tracked end to end.'},
   {key:'potracker', label:'PO tracker', sub:'PO, check payment, and delivery receipt matched automatically.'},
@@ -25,6 +25,16 @@ let state = {
   taskFilterAssignee: 'All',
   salesMonth: monthStr(new Date()),
   memberFilter: 'All',
+  tasksTab: null,
+  checklistDate: null,
+  checklistStaff: null,
+  checklist: null,
+  checkSummary: null,
+  templates: null,
+  promptedUnfinished: false,
+  dueInfo: null,
+  dueBannerDismissed: false,
+  _dueTimer: null,
 };
 
 function curUser(){ return state.currentUser; }
@@ -163,6 +173,7 @@ async function loadAll(){
     state.currentUser = null;
   }
   render();
+  maybePromptUnfinished();
 }
 
 async function refreshStaff(){
@@ -194,6 +205,7 @@ function render(){
   document.getElementById('sectionSub').textContent = sec ? sec.sub : 'This dashboard is being built next.';
   renderContent();
   renderModal();
+  renderDueBanner();
 }
 
 function visibleSections(){
@@ -243,7 +255,7 @@ function renderUserChip(){
   }
   const logoutBtn = document.createElement('button');
   logoutBtn.className = 'btn sm'; logoutBtn.textContent = 'Log out'; logoutBtn.style.marginLeft='6px';
-  logoutBtn.onclick = async ()=>{ try{ await apiPost('/api/auth/logout', {}); }catch(e){} state.currentUser = null; render(); };
+  logoutBtn.onclick = async ()=>{ try{ await apiPost('/api/auth/logout', {}); }catch(e){} state.currentUser = null; state.checklist=null; state.checkSummary=null; state.templates=null; state.checklistStaff=null; state.tasksTab=null; state.promptedUnfinished=false; state.dueInfo=null; state.dueBannerDismissed=false; if(state._dueTimer){ clearInterval(state._dueTimer); state._dueTimer=null; } render(); };
   chip.appendChild(logoutBtn);
   el.appendChild(chip);
 }
@@ -322,7 +334,530 @@ function divider(){ const d=document.createElement('div'); d.className='divider'
 function closeBtn(){ const b=document.createElement('button'); b.className='modal-close'; b.innerHTML='&times;'; b.onclick=()=>{state.modal=null; render();}; return b; }
 
 // ============ DAILY TASK MANAGER ============
+// ============ DAILY TASK CHECKLIST (templates + entries + proof) ============
+function mapEntry(e){
+  return {
+    id:e.id, templateId:e.template_id, staffId:e.staff_id, assignee:e.assignee,
+    title:e.title, section:e.section||'', frequency:e.frequency, category:e.category||'',
+    sortOrder:e.sort_order||0, periodDate:e.period_date, status:e.status,
+    completedAt:e.completed_at, completedBy:e.completed_by, remarks:e.remarks||'',
+    files:(e.task_files||[]).map(f=>({id:f.id, name:f.name, uploadedBy:f.uploaded_by, uploadedAt:f.uploaded_at})),
+  };
+}
+
+async function loadChecklist(staffId, dateStr){
+  const params = new URLSearchParams();
+  params.set('date', dateStr);
+  if(staffId) params.set('staff', staffId);
+  const data = await apiGet('/api/checklist?' + params.toString());
+  state.checklist = {
+    date: data.date, weekStart: data.weekStart,
+    entries: (data.entries||[]).map(mapEntry),
+    loadedFor: (staffId||state.currentUser.id) + '|' + data.date,
+  };
+}
+
+async function loadCheckSummary(dateStr, staffForTrend){
+  const params = new URLSearchParams();
+  params.set('date', dateStr);
+  if(staffForTrend) params.set('staff', staffForTrend);
+  const data = await apiGet('/api/checklist/summary?' + params.toString());
+  state.checkSummary = data;
+}
+
+async function checkDueTasks(){
+  // For Admins: fetch counts of tasks due today / this week / overdue.
+  if(!state.currentUser || accessTier(curRole())==='SuperAdmin') return;
+  try{
+    const data = await apiGet('/api/checklist/due?date=' + todayStr());
+    state.dueInfo = data;
+    renderDueBanner();
+    // Show the modal prompt once per session if anything is due or overdue.
+    if(!state.promptedUnfinished && data.total > 0){
+      state.promptedUnfinished = true;
+      state.modal = {type:'unfinishedPrompt', due:data};
+      render();
+    }
+  }catch(e){ /* checklist may not be set up yet; stay quiet */ }
+}
+
+function maybePromptUnfinished(){
+  // Kick off the first check, then re-check periodically so a due/overdue
+  // notification appears even during a long session (not only at login).
+  checkDueTasks();
+  if(!state._dueTimer){
+    state._dueTimer = setInterval(()=>{ checkDueTasks(); }, 15*60*1000); // every 15 min
+  }
+}
+
+function renderDueBanner(){
+  // A persistent, dismissible banner at the top of the app for due/overdue tasks.
+  const host = document.getElementById('dueBanner');
+  if(!host) return;
+  const d = state.dueInfo;
+  host.innerHTML = '';
+  if(!d || d.total===0 || state.dueBannerDismissed){ host.style.display='none'; return; }
+  host.style.display='';
+  const bits = [];
+  if(d.openToday>0) bits.push(d.openToday + ' due today');
+  if(d.openThisWeek>0) bits.push(d.openThisWeek + ' due this week');
+  if(d.overdue>0) bits.push(d.overdue + ' overdue');
+  const bar = document.createElement('div');
+  bar.className = 'due-banner' + (d.overdue>0 ? ' overdue' : '');
+  const msg = document.createElement('div');
+  msg.innerHTML = '<strong>Tasks need attention:</strong> ' + bits.join(' &middot; ') +
+    (d.overdue>0 && d.overdueSample.length ? ' — e.g. ' + escapeHtml(d.overdueSample[0]) : '');
+  bar.appendChild(msg);
+  const actions = document.createElement('div'); actions.style.cssText='display:flex;gap:8px;flex-shrink:0;';
+  const open = document.createElement('button'); open.className='btn sm primary'; open.textContent='Open checklist';
+  open.onclick = ()=>{ state.section='tasks'; state.tasksTab='checklist'; render(); };
+  actions.appendChild(open);
+  const x = document.createElement('button'); x.className='btn sm ghost'; x.textContent='Dismiss';
+  x.onclick = ()=>{ state.dueBannerDismissed = true; renderDueBanner(); };
+  actions.appendChild(x);
+  bar.appendChild(actions);
+  host.appendChild(bar);
+}
+
+function renderUnfinishedPromptModal(modal){
+  const d = state.modal.due || {openToday:0, openThisWeek:0, overdue:0, overdueSample:[]};
+  const head=document.createElement('div'); head.className='modal-head';
+  head.innerHTML = '<h2 style="font-size:16px;">Tasks need attention</h2>';
+  head.appendChild(closeBtn()); modal.appendChild(head);
+
+  if(d.overdue>0){
+    const warn=document.createElement('div'); warn.className='notice err';
+    warn.innerHTML = '<strong>' + d.overdue + ' overdue task' + (d.overdue===1?'':'s') + '</strong> were not completed on time' +
+      (d.overdueSample && d.overdueSample.length ? ': ' + d.overdueSample.map(escapeHtml).join('; ') + (d.overdue>d.overdueSample.length?'…':'') : '') + '.';
+    modal.appendChild(warn);
+  }
+  const info=document.createElement('div'); info.className='notice';
+  const parts = [];
+  if(d.openToday>0) parts.push(d.openToday + ' due today');
+  if(d.openThisWeek>0) parts.push(d.openThisWeek + ' due this week');
+  info.textContent = parts.length
+    ? 'You have ' + parts.join(' and ') + '. Work through them and mark each as you go — attach a screenshot where proof is useful.'
+    : 'Please review and clear your overdue tasks.';
+  modal.appendChild(info);
+
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Open my checklist';
+  b.onclick=()=>{ state.modal=null; state.section='tasks'; state.tasksTab='checklist'; render(); };
+  row.appendChild(b);
+  const later=document.createElement('button'); later.className='btn ghost'; later.textContent='Later';
+  later.onclick=()=>{ state.modal=null; render(); };
+  row.appendChild(later);
+  modal.appendChild(row);
+}
+
+function renderAddChecklistTaskModal(modal){
+  const {staffId, date} = state.modal;
+  const isSelf = staffId === state.currentUser.id;
+  const person = state.staff.find(s=>s.id===staffId);
+  const head=document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<h2 style="font-size:16px;">Add a task${isSelf?'':' for '+escapeHtml(person?person.name:'')}</h2>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="field full"><label>Task</label><input id="act-title" placeholder="e.g. Follow up on supplier delivery"></div>
+    <div class="form-grid">
+      <div class="field"><label>Frequency</label><select id="act-freq"><option value="Daily">Daily (repeats every day)</option><option value="Weekly">Weekly (repeats every week)</option></select></div>
+      <div class="field"><label>Category (optional)</label><input id="act-category" placeholder="e.g. Admin"></div>
+    </div>
+    <div class="field full"><label>Section (optional)</label><input id="act-section" placeholder="e.g. Closing Tasks"></div>
+    <div class="hint">This becomes a recurring task on the checklist from today onward. To remove it later, use the ✕ on the task.</div>
+    <div id="act-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Add task';
+  b.onclick=async ()=>{
+    const title = document.getElementById('act-title').value.trim();
+    const frequency = document.getElementById('act-freq').value;
+    const category = document.getElementById('act-category').value.trim();
+    const section = document.getElementById('act-section').value.trim();
+    const errEl = document.getElementById('act-error'); errEl.innerHTML='';
+    if(!title){ errEl.innerHTML='<div class="notice err">Enter the task description.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      await apiPost('/api/templates', {staffId, title, frequency, category, section});
+      state.checklist=null; state.templates=null; state.checkSummary=null;
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML=`<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add task'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
 function renderTasks(el){
+  const isSuper = accessTier(curRole())==='SuperAdmin';
+  if(!state.tasksTab) state.tasksTab = isSuper ? 'team' : 'checklist';
+  if(!state.checklistDate) state.checklistDate = todayStr();
+
+  const tabs = document.createElement('div'); tabs.className='toolbar'; tabs.style.marginBottom='18px';
+  const defs = isSuper
+    ? [{k:'team', l:'Team overview'}, {k:'checklist', l:'View a checklist'}, {k:'templates', l:'Manage templates'}, {k:'adhoc', l:'Ad-hoc & projects'}]
+    : [{k:'checklist', l:'My checklist'}, {k:'summary', l:'My summary'}, {k:'adhoc', l:'Ad-hoc & projects'}];
+  defs.forEach(d=>{
+    const b=document.createElement('button');
+    b.className = 'btn' + (state.tasksTab===d.k ? ' primary' : '');
+    b.textContent = d.l;
+    b.onclick = ()=>{ state.tasksTab=d.k; render(); };
+    tabs.appendChild(b);
+  });
+  el.appendChild(tabs);
+
+  if(state.tasksTab==='adhoc') return renderAdhocTasks(el);
+  if(state.tasksTab==='templates') return renderTemplatesView(el);
+  if(state.tasksTab==='team') return renderTeamOverview(el);
+  if(state.tasksTab==='summary') return renderMySummary(el);
+  return renderChecklistView(el);
+}
+
+function checklistPct(entries, freq){
+  const list = entries.filter(e=>e.frequency===freq);
+  const done = list.filter(e=>e.status==='Done').length;
+  return {done, total:list.length, pct: list.length ? Math.round(done/list.length*100) : 0};
+}
+
+function renderChecklistView(el){
+  const isSuper = accessTier(curRole())==='SuperAdmin';
+  const viewingStaff = (isSuper && state.checklistStaff) ? state.checklistStaff : state.currentUser.id;
+  const key = viewingStaff + '|' + state.checklistDate;
+
+  const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
+  const dateInput = document.createElement('input'); dateInput.type='date'; dateInput.value=state.checklistDate;
+  dateInput.onchange = ()=>{ state.checklistDate = dateInput.value || todayStr(); state.checklist=null; render(); };
+  bar.appendChild(dateInput);
+  if(isSuper){
+    const sel = document.createElement('select');
+    sel.innerHTML = state.staff.filter(s=>s.active!==false).map(s=>`<option value="${s.id}" ${s.id===viewingStaff?'selected':''}>${escapeHtml(s.name)}</option>`).join('');
+    sel.onchange = ()=>{ state.checklistStaff = sel.value; state.checklist=null; render(); };
+    bar.appendChild(sel);
+  }
+  // Any user can add a task to the checklist they're viewing (their own, or
+  // anyone's if they're a Super Admin).
+  const addBtn = document.createElement('button'); addBtn.className='btn primary'; addBtn.textContent='+ Add task';
+  addBtn.onclick = ()=>{ state.modal = {type:'addChecklistTask', staffId: viewingStaff, date: state.checklistDate}; render(); };
+  bar.appendChild(addBtn);
+  el.appendChild(bar);
+
+  if(!state.checklist || state.checklist.loadedFor !== key){
+    const loading = document.createElement('div'); loading.className='empty'; loading.textContent='Loading checklist…';
+    el.appendChild(loading);
+    loadChecklist(isSuper ? viewingStaff : null, state.checklistDate).then(()=>render()).catch(e=>{ loading.textContent = e.message; });
+    return;
+  }
+
+  const entries = state.checklist.entries;
+  if(entries.length===0){
+    const e=document.createElement('div'); e.className='empty';
+    e.textContent = 'No checklist tasks are set up for this person yet. ' + (isSuper ? 'Use "Manage templates" to add their daily and weekly tasks.' : 'Ask your supervisor to set up your task templates.');
+    el.appendChild(e); return;
+  }
+
+  const d = checklistPct(entries,'Daily'), w = checklistPct(entries,'Weekly');
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric ${d.pct===100?'good':(d.done===0?'flag':'')}"><div class="num">${d.done}/${d.total}</div><div class="lbl">Daily done (${d.pct}%)</div></div>
+    <div class="metric ${w.pct===100?'good':''}"><div class="num">${w.done}/${w.total}</div><div class="lbl">Weekly done (${w.pct}%)</div></div>
+    <div class="metric"><div class="num">${entries.filter(e=>e.status==='In Progress').length}</div><div class="lbl">In progress</div></div>
+    <div class="metric"><div class="num">${entries.reduce((s,e)=>s+e.files.length,0)}</div><div class="lbl">Proof screenshots</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const groups = [
+    {label:'Daily tasks — ' + fmtDate(state.checklist.date), freq:'Daily'},
+    {label:'Weekly tasks — week of ' + fmtDate(state.checklist.weekStart), freq:'Weekly'},
+  ];
+  groups.forEach(g=>{
+    const list = entries.filter(e=>e.frequency===g.freq);
+    if(!list.length) return;
+    const h = document.createElement('div'); h.className='section-head'; h.innerHTML = `<h2>${g.label}</h2>`;
+    el.appendChild(h);
+    let lastSection = null;
+    list.forEach(t=>{
+      if(t.section && t.section!==lastSection){
+        lastSection = t.section;
+        const sh = document.createElement('div');
+        sh.style.cssText='font-size:11px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 8px;';
+        sh.textContent = t.section;
+        el.appendChild(sh);
+      }
+      el.appendChild(renderChecklistRow(t));
+    });
+  });
+}
+
+function renderChecklistRow(t){
+  const card = document.createElement('div'); card.className='card'; card.style.padding='12px 16px';
+  const pill = t.status==='Done' ? 'done' : t.status==='In Progress' ? 'progress' : 'todo';
+  const top = document.createElement('div'); top.className='req-top';
+  top.innerHTML = `
+    <div style="flex:1;min-width:0;">
+      <div style="font-size:13.5px;color:var(--ink-0);">${escapeHtml(t.title)}</div>
+      <div class="req-sub">${t.category?escapeHtml(t.category)+' &middot; ':''}${t.status==='Done'&&t.completedAt ? 'done '+fmtDateTime(t.completedAt)+(t.completedBy?' by '+escapeHtml(t.completedBy):'') : t.status}${t.remarks?' &middot; '+escapeHtml(t.remarks):''}</div>
+    </div>
+    <span class="status-pill ${pill}">${t.status}</span>
+  `;
+  card.appendChild(top);
+
+  if(t.files.length){
+    const files = document.createElement('div'); files.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;';
+    t.files.forEach(f=>{
+      const a=document.createElement('button'); a.className='btn sm ghost'; a.textContent='📎 ' + (f.name||'proof');
+      a.onclick=()=>window.open(`/api/checklist/${t.id}/files?file=${f.id}`,'_blank');
+      files.appendChild(a);
+    });
+    card.appendChild(files);
+  }
+
+  const row = document.createElement('div'); row.className='action-row'; row.style.marginTop='10px';
+  const setStatus = async (status)=>{
+    try{
+      const {entry} = await apiPatch(`/api/checklist/${t.id}`, {status});
+      const i = state.checklist.entries.findIndex(x=>x.id===t.id);
+      if(i>=0) state.checklist.entries[i] = mapEntry(entry);
+      render();
+      checkDueTasks();
+    }catch(e){ alert(e.message); }
+  };
+  if(t.status!=='Done'){
+    if(t.status!=='In Progress'){
+      const b=document.createElement('button'); b.className='btn sm'; b.textContent='Start';
+      b.onclick=()=>setStatus('In Progress'); row.appendChild(b);
+    }
+    const b=document.createElement('button'); b.className='btn sm primary'; b.textContent='Mark done';
+    b.onclick=()=>setStatus('Done'); row.appendChild(b);
+    const sk=document.createElement('button'); sk.className='btn sm ghost'; sk.textContent='Skip';
+    sk.onclick=async ()=>{
+      const reason = prompt('Why is this task being skipped? (required)');
+      if(reason===null) return;
+      if(!reason.trim()){ alert('A reason is required to skip a task.'); return; }
+      try{
+        await apiPatch(`/api/checklist/${t.id}`, {remarks:reason.trim()});
+        const {entry} = await apiPatch(`/api/checklist/${t.id}`, {status:'Skipped'});
+        const i = state.checklist.entries.findIndex(x=>x.id===t.id);
+        if(i>=0) state.checklist.entries[i] = mapEntry(entry);
+        render();
+      }catch(e){ alert(e.message); }
+    };
+    row.appendChild(sk);
+  } else {
+    const b=document.createElement('button'); b.className='btn sm ghost'; b.textContent='Reopen';
+    b.onclick=()=>setStatus('Not Started'); row.appendChild(b);
+  }
+
+  const fileInput = document.createElement('input');
+  fileInput.type='file'; fileInput.accept='image/*'; fileInput.style.display='none';
+  const attachBtn=document.createElement('button'); attachBtn.className='btn sm'; attachBtn.textContent='📷 Attach proof';
+  fileInput.onchange = async ()=>{
+    const file = fileInput.files[0];
+    if(!file) return;
+    if(file.size > 4*1024*1024){ alert('That file is over 4MB. Attach a smaller image.'); return; }
+    attachBtn.disabled=true; attachBtn.textContent='Uploading…';
+    try{
+      const {entry} = await apiUpload(`/api/checklist/${t.id}/files`, file, 'Proof');
+      const i = state.checklist.entries.findIndex(x=>x.id===t.id);
+      if(i>=0) state.checklist.entries[i] = mapEntry(entry);
+      render();
+    }catch(e){ alert(e.message); attachBtn.disabled=false; attachBtn.textContent='📷 Attach proof'; }
+  };
+  attachBtn.onclick=()=>fileInput.click();
+  row.appendChild(attachBtn);
+  row.appendChild(fileInput);
+
+  // Remove this recurring task (own tasks, or any for a Super Admin).
+  const canRemove = t.templateId && (t.staffId === state.currentUser.id || accessTier(curRole())==='SuperAdmin');
+  if(canRemove){
+    const rm = document.createElement('button'); rm.className='btn sm ghost'; rm.textContent='✕ Remove';
+    rm.title = 'Stop this task from recurring on the checklist';
+    rm.onclick = async ()=>{
+      if(!confirm('Remove "' + t.title + '" from this checklist going forward? Past days keep their record.')) return;
+      try{
+        await apiPatch(`/api/templates/${t.templateId}`, {active:false});
+        state.checklist=null; state.templates=null; state.checkSummary=null;
+        render();
+      }catch(e){ alert(e.message); }
+    };
+    row.appendChild(rm);
+  }
+
+  card.appendChild(row);
+  return card;
+}
+
+function trendBars(trend){
+  const wrap = document.createElement('div'); wrap.className='card';
+  wrap.innerHTML = '<h2 style="font-size:13px;color:var(--ink-1);margin-bottom:12px;">Daily completion — last 7 days</h2>';
+  trend.forEach(day=>{
+    const pct = day.total ? Math.round(day.done/day.total*100) : 0;
+    const row = document.createElement('div'); row.className='bar-row';
+    row.innerHTML = `<div class="bl">${fmtDate(day.date)}</div><div class="bt"><div class="bf" style="width:${pct}%;${pct===100?'background:var(--lime);':''}"></div></div><div class="bv">${day.done}/${day.total} (${pct}%)</div>`;
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+function renderMySummary(el){
+  if(!state.checklistDate) state.checklistDate = todayStr();
+  if(!state.checkSummary || state.checkSummary.date !== state.checklistDate || !state.checkSummary.trend){
+    const loading = document.createElement('div'); loading.className='empty'; loading.textContent='Loading summary…';
+    el.appendChild(loading);
+    loadCheckSummary(state.checklistDate, state.currentUser.id).then(()=>render()).catch(e=>{ loading.textContent=e.message; });
+    return;
+  }
+  const me = state.checkSummary.perStaff.find(s=>s.staffId===state.currentUser.id) || state.checkSummary.perStaff[0];
+  if(!me){ const e=document.createElement('div'); e.className='empty'; e.textContent='No checklist data yet.'; el.appendChild(e); return; }
+  const dPct = me.dailyTotal ? Math.round(me.dailyDone/me.dailyTotal*100) : 0;
+  const wPct = me.weeklyTotal ? Math.round(me.weeklyDone/me.weeklyTotal*100) : 0;
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric ${dPct===100?'good':''}"><div class="num">${dPct}%</div><div class="lbl">Today: ${me.dailyDone}/${me.dailyTotal} daily done</div></div>
+    <div class="metric ${wPct===100?'good':''}"><div class="num">${wPct}%</div><div class="lbl">This week: ${me.weeklyDone}/${me.weeklyTotal} weekly done</div></div>
+    <div class="metric"><div class="num">${me.dailySkipped+me.weeklySkipped}</div><div class="lbl">Skipped</div></div>
+    <div class="metric"><div class="num" style="font-size:15px;">${me.lastUpdate?fmtDateTime(me.lastUpdate):'—'}</div><div class="lbl">Last task completed</div></div>
+  `;
+  el.appendChild(metrics);
+  if(state.checkSummary.trend) el.appendChild(trendBars(state.checkSummary.trend));
+}
+
+function renderTeamOverview(el){
+  if(!state.checklistDate) state.checklistDate = todayStr();
+  const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
+  const dateInput = document.createElement('input'); dateInput.type='date'; dateInput.value=state.checklistDate;
+  dateInput.onchange = ()=>{ state.checklistDate = dateInput.value || todayStr(); state.checkSummary=null; render(); };
+  bar.appendChild(dateInput);
+  el.appendChild(bar);
+
+  if(!state.checkSummary || state.checkSummary.date !== state.checklistDate){
+    const loading = document.createElement('div'); loading.className='empty'; loading.textContent='Loading team summary…';
+    el.appendChild(loading);
+    loadCheckSummary(state.checklistDate, null).then(()=>render()).catch(e=>{ loading.textContent=e.message; });
+    return;
+  }
+
+  const per = state.checkSummary.perStaff;
+  if(!per.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No staff have checklist templates yet. Use "Manage templates" to set them up.'; el.appendChild(e); return; }
+
+  const totalDone = per.reduce((s,p)=>s+p.dailyDone,0);
+  const totalAll = per.reduce((s,p)=>s+p.dailyTotal,0);
+  const fullyDone = per.filter(p=>p.dailyTotal>0 && p.dailyDone===p.dailyTotal).length;
+  const notStarted = per.filter(p=>p.dailyDone===0 && p.dailyTotal>0).length;
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric"><div class="num">${totalAll?Math.round(totalDone/totalAll*100):0}%</div><div class="lbl">Team daily completion</div></div>
+    <div class="metric good"><div class="num">${fullyDone}</div><div class="lbl">Staff fully done today</div></div>
+    <div class="metric ${notStarted>0?'flag':''}"><div class="num">${notStarted}</div><div class="lbl">Staff not started</div></div>
+    <div class="metric"><div class="num">${per.length}</div><div class="lbl">Staff with checklists</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const card = document.createElement('div'); card.className='card';
+  const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;';
+  const table = document.createElement('table'); table.className='simple';
+  table.innerHTML = '<thead><tr><th>Employee</th><th>Daily tasks</th><th>Progress</th><th>Weekly tasks</th><th>Last completed</th><th></th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  per.sort((a,b)=> (b.dailyTotal?b.dailyDone/b.dailyTotal:0) - (a.dailyTotal?a.dailyDone/a.dailyTotal:0));
+  per.forEach(p=>{
+    const pct = p.dailyTotal ? Math.round(p.dailyDone/p.dailyTotal*100) : 0;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(p.name)}</td>
+      <td>${p.dailyDone}/${p.dailyTotal}${p.dailySkipped?' <span class="hint">('+p.dailySkipped+' skipped)</span>':''}</td>
+      <td style="min-width:140px;"><div class="bt" style="height:8px;"><div class="bf" style="width:${pct}%;${pct===100?'background:var(--lime);':''}"></div></div></td>
+      <td>${p.weeklyDone}/${p.weeklyTotal}</td>
+      <td>${p.lastUpdate?fmtDateTime(p.lastUpdate):'—'}</td>
+    `;
+    const td = document.createElement('td');
+    const b = document.createElement('button'); b.className='btn sm'; b.textContent='Open checklist';
+    b.onclick = ()=>{ state.checklistStaff = p.staffId; state.checklist=null; state.tasksTab='checklist'; render(); };
+    td.appendChild(b); tr.appendChild(td);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  scroll.appendChild(table);
+  card.appendChild(scroll);
+  el.appendChild(card);
+}
+
+function renderTemplatesView(el){
+  if(!state.templates){
+    const loading = document.createElement('div'); loading.className='empty'; loading.textContent='Loading templates…';
+    el.appendChild(loading);
+    apiGet('/api/templates').then(data=>{ state.templates = data.templates||[]; render(); }).catch(e=>{ loading.textContent=e.message; });
+    return;
+  }
+
+  const note = document.createElement('div'); note.className='notice';
+  note.textContent = "These recurring tasks generate each person's daily and weekly checklist automatically. Edits apply from today onward — past days keep the checklist they were given.";
+  el.appendChild(note);
+
+  const addCard = document.createElement('div'); addCard.className='card';
+  addCard.innerHTML = `
+    <h2 style="font-size:13px;color:var(--ink-1);margin-bottom:12px;">Add a task</h2>
+    <div class="form-grid">
+      <div class="field"><label>Employee</label><select id="tpl-staff">${state.staff.filter(s=>s.active!==false).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Frequency</label><select id="tpl-freq"><option>Daily</option><option>Weekly</option></select></div>
+      <div class="field full"><label>Task</label><input id="tpl-title" placeholder="e.g. Send inventory to GC"></div>
+      <div class="field"><label>Section (optional)</label><input id="tpl-section" placeholder="e.g. Closing Tasks"></div>
+      <div class="field"><label>Category (optional)</label><input id="tpl-category" placeholder="e.g. Admin"></div>
+    </div>
+    <div id="tpl-error"></div>
+  `;
+  const addRow = document.createElement('div'); addRow.className='action-row';
+  const addBtn = document.createElement('button'); addBtn.className='btn primary'; addBtn.textContent='Add task';
+  addBtn.onclick = async ()=>{
+    const staffId = document.getElementById('tpl-staff').value;
+    const frequency = document.getElementById('tpl-freq').value;
+    const title = document.getElementById('tpl-title').value.trim();
+    const section = document.getElementById('tpl-section').value.trim();
+    const category = document.getElementById('tpl-category').value.trim();
+    const errEl = document.getElementById('tpl-error'); errEl.innerHTML='';
+    if(!title){ errEl.innerHTML='<div class="notice err">Enter the task description.</div>'; return; }
+    addBtn.disabled=true; addBtn.textContent='Saving…';
+    try{
+      const {template} = await apiPost('/api/templates', {staffId, frequency, title, section, category});
+      state.templates.push(template);
+      render();
+    }catch(e){ errEl.innerHTML=`<div class="notice err">${escapeHtml(e.message)}</div>`; addBtn.disabled=false; addBtn.textContent='Add task'; }
+  };
+  addRow.appendChild(addBtn);
+  addCard.appendChild(addRow);
+  el.appendChild(addCard);
+
+  const byStaff = {};
+  state.templates.filter(t=>t.active!==false).forEach(t=>{ (byStaff[t.assignee] = byStaff[t.assignee]||[]).push(t); });
+  Object.keys(byStaff).sort().forEach(name=>{
+    const list = byStaff[name].sort((a,b)=> (a.frequency===b.frequency ? (a.sort_order-b.sort_order) : a.frequency==='Daily'?-1:1));
+    const h = document.createElement('div'); h.className='section-head';
+    h.innerHTML = `<h2>${escapeHtml(name)} <span class="hint" style="text-transform:none;letter-spacing:0;">(${list.filter(t=>t.frequency==='Daily').length} daily · ${list.filter(t=>t.frequency==='Weekly').length} weekly)</span></h2>`;
+    el.appendChild(h);
+    const card = document.createElement('div'); card.className='card';
+    const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;';
+    const table = document.createElement('table'); table.className='simple';
+    table.innerHTML = '<thead><tr><th>Task</th><th>Freq</th><th>Section</th><th>Category</th><th></th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    list.forEach(t=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${escapeHtml(t.title)}</td><td>${t.frequency}</td><td class="hint">${escapeHtml(t.section||'—')}</td><td class="hint">${escapeHtml(t.category||'—')}</td>`;
+      const td = document.createElement('td');
+      const rm = document.createElement('button'); rm.className='btn sm'; rm.textContent='Remove';
+      rm.onclick = async ()=>{
+        if(!confirm('Remove this task from ' + name + "'s checklist from today onward?")) return;
+        try{ await apiPatch(`/api/templates/${t.id}`, {active:false}); t.active=false; render(); }
+        catch(e){ alert(e.message); }
+      };
+      td.appendChild(rm); tr.appendChild(td);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    scroll.appendChild(table);
+    card.appendChild(scroll);
+    el.appendChild(card);
+  });
+}
+
+function renderAdhocTasks(el){
   const assignees = Array.from(new Set(state.tasks.map(t=>t.assignee))).filter(Boolean).sort();
   const todays = state.tasks.filter(t=>t.date===todayStr());
   const doneToday = todays.filter(t=>t.status==='Done').length;
@@ -1764,6 +2299,8 @@ function renderModal(){
   if(state.modal.type==='staff') return renderStaffModal(modal);
   if(state.modal.type==='resetPassword') return renderResetPasswordModal(modal);
   if(state.modal.type==='changePassword') return renderChangePasswordModal(modal);
+  if(state.modal.type==='unfinishedPrompt') return renderUnfinishedPromptModal(modal);
+  if(state.modal.type==='addChecklistTask') return renderAddChecklistTaskModal(modal);
   if(state.modal.type==='newTask') return renderNewTaskModal(modal);
   if(state.modal.type==='newSale') return renderNewSaleModal(modal);
   if(state.modal.type==='newMember') return renderNewMemberModal(modal);
