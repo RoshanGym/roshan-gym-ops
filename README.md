@@ -1,6 +1,6 @@
 # Roshan Gym Ops — deployment guide
 
-This is a real, database-backed version of the Roshan Gym app: Next.js on
+This is a real, database-backed version of the Roshan Gym app: Next.js on.
 Vercel, Postgres on Supabase. Follow these steps in order.
 
 ## 1. Create a Supabase project
