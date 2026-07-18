@@ -6,7 +6,8 @@ import { withApi, ok } from '../../../../lib/api';
 export const PATCH = withApi(async (req, { params }) => {
   const session = requireSession();
   requireRole(session, SUPER_ADMIN_ROLES);
-  const { action, password } = await req.json();
+  const body = await req.json();
+  const { action, password } = body;
   const db = supabaseAdmin();
 
   if (action === 'reset-password') {
@@ -27,6 +28,20 @@ export const PATCH = withApi(async (req, { params }) => {
     const { error } = await db.from('staff').update({ active: !person.active }).eq('id', params.id);
     if (error) throw error;
     return ok({ success: true, active: !person.active });
+  }
+
+  if (action === 'set-shift') {
+    const { shiftEndHour } = body;
+    const allowed = [0, 15, 20, 23];
+    const val = Number(shiftEndHour);
+    if (!allowed.includes(val)) {
+      const err = new Error('Invalid shift end.');
+      err.status = 400;
+      throw err;
+    }
+    const { error } = await db.from('staff').update({ shift_end_hour: val }).eq('id', params.id);
+    if (error) throw error;
+    return ok({ success: true, shiftEndHour: val });
   }
 
   const err = new Error('Unknown action.');

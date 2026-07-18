@@ -5,6 +5,16 @@ import { weekStartOf, materialize } from '../../../../lib/checklist';
 
 export const dynamic = 'force-dynamic';
 
+// Rest-day sentinel: shift_end_hour 0 means no escalation that day.
+const REST_DAY = 0;
+
+// Current date + hour in Manila (UTC+8), independent of server timezone.
+function manilaNow() {
+  const now = new Date();
+  const manila = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  return { date: manila.toISOString().slice(0, 10), hour: manila.getUTCHours() };
+}
+
 function statsFor(entries) {
   const daily = entries.filter((e) => e.frequency === 'Daily');
   const weekly = entries.filter((e) => e.frequency === 'Weekly');
@@ -28,6 +38,7 @@ export const GET = withApi(async (req) => {
   const weekStart = weekStartOf(dateStr);
   const isSuper = tierFor(session.role) === 'SuperAdmin';
 
+  // Which staff to include: all template-holders for SuperAdmin, self otherwise
   let staffIds = [session.id];
   let staffList = [{ id: session.id, name: session.name }];
   if (isSuper) {
@@ -42,6 +53,18 @@ export const GET = withApi(async (req) => {
     staffList = staffIds.map((id) => ({ id, name: map.get(id) }));
   }
 
+  // Each person's shift end hour (Manila). Drives when they escalate.
+  const shiftMap = new Map();
+  if (staffIds.length) {
+    const { data: shifts, error: shErr } = await db
+      .from('staff')
+      .select('id, shift_end_hour')
+      .in('id', staffIds);
+    if (shErr) throw shErr;
+    (shifts || []).forEach((s) => shiftMap.set(s.id, s.shift_end_hour));
+  }
+
+  // Materialize today's entries for everyone in scope so numbers are live
   for (const id of staffIds) {
     await materialize(db, id, dateStr);
   }
@@ -53,12 +76,28 @@ export const GET = withApi(async (req) => {
     .or(`and(frequency.eq.Daily,period_date.eq.${dateStr}),and(frequency.eq.Weekly,period_date.eq.${weekStart})`);
   if (entErr) throw entErr;
 
+  const mNow = manilaNow();
+
   const perStaff = staffList.map((s) => {
     const own = (entries || []).filter((e) => e.staff_id === s.id);
     const lastUpdate = own.map((e) => e.completed_at).filter(Boolean).sort().pop() || null;
-    return { staffId: s.id, name: s.name, ...statsFor(own), lastUpdate };
+    const stats = statsFor(own);
+    const dailyOpen = stats.dailyTotal - stats.dailyDone - stats.dailySkipped;
+    // This person's own shift end (default 15 = 3PM). REST_DAY (0) = never escalate.
+    const shiftEnd = shiftMap.has(s.id) ? shiftMap.get(s.id) : 15;
+    let pastShiftEnd = false;
+    if (shiftEnd !== REST_DAY) {
+      pastShiftEnd = (dateStr < mNow.date) || (dateStr === mNow.date && mNow.hour >= shiftEnd);
+    }
+    const escalated = pastShiftEnd && dailyOpen > 0;
+    return { staffId: s.id, name: s.name, ...stats, lastUpdate, dailyOpen, shiftEndHour: shiftEnd, escalated };
   });
 
+  // Whether any escalation window is active (used for the "all clear" note).
+  const anyCutoffPassed = perStaff.some((p) => p.shiftEndHour !== REST_DAY &&
+    ((dateStr < mNow.date) || (dateStr === mNow.date && mNow.hour >= p.shiftEndHour)));
+
+  // 7-day daily-completion trend (single-staff requests only)
   let trend = null;
   const trendStaff = url.searchParams.get('staff') || (!isSuper ? session.id : null);
   if (trendStaff) {
@@ -87,5 +126,5 @@ export const GET = withApi(async (req) => {
     });
   }
 
-  return ok({ date: dateStr, weekStart, perStaff, trend });
+  return ok({ date: dateStr, weekStart, perStaff, trend, cutoffPassed: anyCutoffPassed });
 });

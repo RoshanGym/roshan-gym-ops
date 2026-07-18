@@ -5,6 +5,14 @@ import { weekStartOf, materialize } from '../../../../lib/checklist';
 
 export const dynamic = 'force-dynamic';
 
+const REST_DAY = 0;
+
+function manilaNow() {
+  const now = new Date();
+  const manila = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  return { date: manila.toISOString().slice(0, 10), hour: manila.getUTCHours() };
+}
+
 // Reports unfinished tasks that are DUE for the signed-in user:
 //  - today's daily tasks still open
 //  - this week's weekly tasks still open
@@ -40,6 +48,16 @@ export const GET = withApi(async (req) => {
     }
   });
 
+  const mNow = manilaNow();
+  // This admin's own shift end (default 15 = 3PM). REST_DAY (0) = no escalation.
+  const { data: me } = await db.from('staff').select('shift_end_hour').eq('id', session.id).single();
+  const shiftEnd = me && me.shift_end_hour != null ? me.shift_end_hour : 15;
+  let cutoffPassed = false;
+  if (shiftEnd !== REST_DAY) {
+    cutoffPassed = (today < mNow.date) || (today === mNow.date && mNow.hour >= shiftEnd);
+  }
+  const escalated = cutoffPassed && openToday.length > 0;
+
   return ok({
     date: today,
     openToday: openToday.length,
@@ -47,5 +65,9 @@ export const GET = withApi(async (req) => {
     overdue: overdue.length,
     overdueSample: overdue.slice(0, 5).map((e) => e.title),
     total: openToday.length + openThisWeek.length + overdue.length,
+    cutoffHour: shiftEnd,
+    cutoffPassed,
+    escalated,
+    restDay: shiftEnd === REST_DAY,
   });
 });

@@ -11,7 +11,7 @@ export const GET = withApi(async () => {
   const db = supabaseAdmin();
   const { data, error } = await db
     .from('staff')
-    .select('id,name,username,role,active,created_at')
+    .select('id,name,username,role,active,created_at,shift_end_hour')
     .order('name');
   if (error) throw error;
   return ok({ staff: data });
@@ -41,7 +41,7 @@ export const POST = withApi(async (req) => {
   const { data, error } = await db
     .from('staff')
     .insert({ name, username: username.trim().toLowerCase(), password_hash, role, active: true })
-    .select('id,name,username,role,active,created_at')
+    .select('id,name,username,role,active,created_at,shift_end_hour')
     .single();
   if (error) {
     if (error.code === '23505') {

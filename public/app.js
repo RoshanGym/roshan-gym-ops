@@ -29,10 +29,12 @@ let state = {
   checklistDate: null,
   checklistStaff: null,
   checklist: null,
+  checklistFilter: 'All',
   checkSummary: null,
   templates: null,
   promptedUnfinished: false,
   dueInfo: null,
+  teamEscalation: null,
   dueBannerDismissed: false,
   _dueTimer: null,
 };
@@ -255,7 +257,7 @@ function renderUserChip(){
   }
   const logoutBtn = document.createElement('button');
   logoutBtn.className = 'btn sm'; logoutBtn.textContent = 'Log out'; logoutBtn.style.marginLeft='6px';
-  logoutBtn.onclick = async ()=>{ try{ await apiPost('/api/auth/logout', {}); }catch(e){} state.currentUser = null; state.checklist=null; state.checkSummary=null; state.templates=null; state.checklistStaff=null; state.tasksTab=null; state.promptedUnfinished=false; state.dueInfo=null; state.dueBannerDismissed=false; if(state._dueTimer){ clearInterval(state._dueTimer); state._dueTimer=null; } render(); };
+  logoutBtn.onclick = async ()=>{ try{ await apiPost('/api/auth/logout', {}); }catch(e){} state.currentUser = null; state.checklist=null; state.checkSummary=null; state.templates=null; state.checklistStaff=null; state.checklistFilter='All'; state.tasksTab=null; state.promptedUnfinished=false; state.dueInfo=null; state.teamEscalation=null; state.dueBannerDismissed=false; if(state._dueTimer){ clearInterval(state._dueTimer); state._dueTimer=null; } render(); };
   chip.appendChild(logoutBtn);
   el.appendChild(chip);
 }
@@ -367,7 +369,8 @@ async function loadCheckSummary(dateStr, staffForTrend){
 
 async function checkDueTasks(){
   // For Admins: fetch counts of tasks due today / this week / overdue.
-  if(!state.currentUser || accessTier(curRole())==='SuperAdmin') return;
+  if(!state.currentUser) return;
+  if(accessTier(curRole())==='SuperAdmin') return checkTeamEscalations();
   try{
     const data = await apiGet('/api/checklist/due?date=' + todayStr());
     state.dueInfo = data;
@@ -379,6 +382,17 @@ async function checkDueTasks(){
       render();
     }
   }catch(e){ /* checklist may not be set up yet; stay quiet */ }
+}
+
+async function checkTeamEscalations(){
+  // For Super Admins: surface a banner if any staff missed the daily cutoff.
+  try{
+    const data = await apiGet('/api/checklist/summary?date=' + todayStr());
+    state.checkSummary = data;
+    const escalated = (data.perStaff||[]).filter(p=>p.escalated);
+    state.teamEscalation = escalated.length ? {count:escalated.length, names:escalated.map(p=>p.name)} : null;
+    renderDueBanner();
+  }catch(e){ /* stay quiet */ }
 }
 
 function maybePromptUnfinished(){
@@ -394,8 +408,31 @@ function renderDueBanner(){
   // A persistent, dismissible banner at the top of the app for due/overdue tasks.
   const host = document.getElementById('dueBanner');
   if(!host) return;
-  const d = state.dueInfo;
   host.innerHTML = '';
+
+  // Super Admin: show a team escalation banner if any staff missed the cutoff.
+  if(state.currentUser && accessTier(curRole())==='SuperAdmin'){
+    const esc = state.teamEscalation;
+    if(!esc || state.dueBannerDismissed){ host.style.display='none'; return; }
+    host.style.display='';
+    const bar = document.createElement('div'); bar.className='due-banner overdue';
+    const msg = document.createElement('div');
+    msg.innerHTML = '<strong>Task escalation:</strong> ' + esc.count + ' staff missed the daily deadline — ' +
+      esc.names.map(escapeHtml).join(', ') + '.';
+    bar.appendChild(msg);
+    const actions = document.createElement('div'); actions.style.cssText='display:flex;gap:8px;flex-shrink:0;';
+    const open = document.createElement('button'); open.className='btn sm primary'; open.textContent='View team';
+    open.onclick = ()=>{ state.section='tasks'; state.tasksTab='team'; render(); };
+    actions.appendChild(open);
+    const x = document.createElement('button'); x.className='btn sm ghost'; x.textContent='Dismiss';
+    x.onclick = ()=>{ state.dueBannerDismissed = true; renderDueBanner(); };
+    actions.appendChild(x);
+    bar.appendChild(actions);
+    host.appendChild(bar);
+    return;
+  }
+
+  const d = state.dueInfo;
   if(!d || d.total===0 || state.dueBannerDismissed){ host.style.display='none'; return; }
   host.style.display='';
   const bits = [];
@@ -403,10 +440,18 @@ function renderDueBanner(){
   if(d.openThisWeek>0) bits.push(d.openThisWeek + ' due this week');
   if(d.overdue>0) bits.push(d.overdue + ' overdue');
   const bar = document.createElement('div');
-  bar.className = 'due-banner' + (d.overdue>0 ? ' overdue' : '');
+  const escalated = d.escalated;
+  bar.className = 'due-banner' + (escalated || d.overdue>0 ? ' overdue' : '');
   const msg = document.createElement('div');
-  msg.innerHTML = '<strong>Tasks need attention:</strong> ' + bits.join(' &middot; ') +
-    (d.overdue>0 && d.overdueSample.length ? ' — e.g. ' + escapeHtml(d.overdueSample[0]) : '');
+  if(escalated){
+    const ch = d.cutoffHour!=null ? d.cutoffHour : 15;
+    const label = (ch>12?(ch-12):ch) + ':00 ' + (ch>=12?'PM':'AM');
+    msg.innerHTML = '<strong>Past your ' + label + ' shift-end — supervisor notified.</strong> ' +
+      d.openToday + ' task' + (d.openToday===1?'':'s') + ' still open today. Please finish as soon as possible.';
+  } else {
+    msg.innerHTML = '<strong>Tasks need attention:</strong> ' + bits.join(' &middot; ') +
+      (d.overdue>0 && d.overdueSample.length ? ' — e.g. ' + escapeHtml(d.overdueSample[0]) : '');
+  }
   bar.appendChild(msg);
   const actions = document.createElement('div'); actions.style.cssText='display:flex;gap:8px;flex-shrink:0;';
   const open = document.createElement('button'); open.className='btn sm primary'; open.textContent='Open checklist';
@@ -548,6 +593,27 @@ function renderChecklistView(el){
   bar.appendChild(addBtn);
   el.appendChild(bar);
 
+  // Completion deadline notice for the person's own checklist (Admins).
+  if(!isSuper && state.dueInfo && state.dueInfo.cutoffHour != null){
+    const dl = document.createElement('div');
+    if(state.dueInfo.restDay){
+      dl.className = 'notice';
+      dl.textContent = 'You\u2019re marked as rest day today — no task deadline or supervisor alerts. Update anything you like, but nothing will be escalated.';
+      el.appendChild(dl);
+    } else {
+      const ch = state.dueInfo.cutoffHour;
+      const label = (ch>12? (ch-12):ch) + ':00 ' + (ch>=12?'PM':'AM');
+      if(state.dueInfo.escalated){
+        dl.className = 'notice err';
+        dl.textContent = 'Your ' + label + ' shift-end deadline has passed with tasks still open — your supervisor has been notified. Please complete them as soon as possible.';
+      } else {
+        dl.className = 'notice';
+        dl.textContent = 'Complete all of today\u2019s tasks by ' + label + ' (your shift end). After that, any still open are flagged to your supervisor.';
+      }
+      el.appendChild(dl);
+    }
+  }
+
   if(!state.checklist || state.checklist.loadedFor !== key){
     const loading = document.createElement('div'); loading.className='empty'; loading.textContent='Loading checklist…';
     el.appendChild(loading);
@@ -572,13 +638,36 @@ function renderChecklistView(el){
   `;
   el.appendChild(metrics);
 
+  // ----- Status filter chips -----
+  if(!state.checklistFilter) state.checklistFilter = 'All';
+  const counts = {
+    All: entries.length,
+    'Not Started': entries.filter(e=>e.status==='Not Started').length,
+    'In Progress': entries.filter(e=>e.status==='In Progress').length,
+    Done: entries.filter(e=>e.status==='Done').length,
+    Skipped: entries.filter(e=>e.status==='Skipped').length,
+  };
+  const filterBar = document.createElement('div'); filterBar.className='toolbar'; filterBar.style.margin='4px 0 8px';
+  ['All','Not Started','In Progress','Done','Skipped'].forEach(f=>{
+    const chip = document.createElement('button');
+    chip.className = 'btn sm' + (state.checklistFilter===f ? ' primary' : '');
+    chip.textContent = f + ' (' + counts[f] + ')';
+    chip.onclick = ()=>{ state.checklistFilter = f; render(); };
+    filterBar.appendChild(chip);
+  });
+  el.appendChild(filterBar);
+
+  const matchesFilter = (t)=> state.checklistFilter==='All' || t.status===state.checklistFilter;
+
   const groups = [
     {label:'Daily tasks — ' + fmtDate(state.checklist.date), freq:'Daily'},
     {label:'Weekly tasks — week of ' + fmtDate(state.checklist.weekStart), freq:'Weekly'},
   ];
+  let shownAny = false;
   groups.forEach(g=>{
-    const list = entries.filter(e=>e.frequency===g.freq);
+    const list = entries.filter(e=>e.frequency===g.freq && matchesFilter(e));
     if(!list.length) return;
+    shownAny = true;
     const h = document.createElement('div'); h.className='section-head'; h.innerHTML = `<h2>${g.label}</h2>`;
     el.appendChild(h);
     let lastSection = null;
@@ -593,6 +682,11 @@ function renderChecklistView(el){
       el.appendChild(renderChecklistRow(t));
     });
   });
+  if(!shownAny){
+    const e=document.createElement('div'); e.className='empty';
+    e.textContent = state.checklistFilter==='All' ? 'No tasks.' : 'No ' + state.checklistFilter.toLowerCase() + ' tasks.';
+    el.appendChild(e);
+  }
 }
 
 function renderChecklistRow(t){
@@ -746,6 +840,21 @@ function renderTeamOverview(el){
   const per = state.checkSummary.perStaff;
   if(!per.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No staff have checklist templates yet. Use "Manage templates" to set them up.'; el.appendChild(e); return; }
 
+  // Escalation alert: admins who still had open daily tasks after their shift end.
+  const escalatedStaff = per.filter(p=>p.escalated);
+  if(escalatedStaff.length){
+    const shiftLabel = (h)=> h===0 ? 'rest day' : ((h>12?(h-12):h) + ':00 ' + (h>=12?'PM':'AM'));
+    const alert = document.createElement('div'); alert.className='notice err';
+    const names = escalatedStaff.map(p=>escapeHtml(p.name)+' — '+p.dailyOpen+' open, shift ended '+shiftLabel(p.shiftEndHour)).join('; ');
+    alert.innerHTML = '<strong>Task escalation:</strong> ' +
+      escalatedStaff.length + ' staff passed their shift end with open daily tasks: ' + names + '.';
+    el.appendChild(alert);
+  } else if(state.checkSummary.cutoffPassed){
+    const ok = document.createElement('div'); ok.className='notice';
+    ok.textContent = 'All staff completed (or skipped) their daily tasks before the deadline. No escalations.';
+    el.appendChild(ok);
+  }
+
   const totalDone = per.reduce((s,p)=>s+p.dailyDone,0);
   const totalAll = per.reduce((s,p)=>s+p.dailyTotal,0);
   const fullyDone = per.filter(p=>p.dailyTotal>0 && p.dailyDone===p.dailyTotal).length;
@@ -762,14 +871,16 @@ function renderTeamOverview(el){
   const card = document.createElement('div'); card.className='card';
   const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;';
   const table = document.createElement('table'); table.className='simple';
-  table.innerHTML = '<thead><tr><th>Employee</th><th>Daily tasks</th><th>Progress</th><th>Weekly tasks</th><th>Last completed</th><th></th></tr></thead>';
+  table.innerHTML = '<thead><tr><th>Employee</th><th>Shift end</th><th>Daily tasks</th><th>Progress</th><th>Weekly tasks</th><th>Last completed</th><th></th></tr></thead>';
   const tbody = document.createElement('tbody');
+  const shiftLbl = (h)=> h===0 ? 'Rest day' : ((h>12?(h-12):h) + ':00 ' + (h>=12?'PM':'AM'));
   per.sort((a,b)=> (b.dailyTotal?b.dailyDone/b.dailyTotal:0) - (a.dailyTotal?a.dailyDone/a.dailyTotal:0));
   per.forEach(p=>{
     const pct = p.dailyTotal ? Math.round(p.dailyDone/p.dailyTotal*100) : 0;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${escapeHtml(p.name)}</td>
+      <td>${escapeHtml(p.name)}${p.escalated?' <span class="badge flag">escalated</span>':''}</td>
+      <td class="hint">${shiftLbl(p.shiftEndHour!=null?p.shiftEndHour:15)}</td>
       <td>${p.dailyDone}/${p.dailyTotal}${p.dailySkipped?' <span class="hint">('+p.dailySkipped+' skipped)</span>':''}</td>
       <td style="min-width:140px;"><div class="bt" style="height:8px;"><div class="bf" style="width:${pct}%;${pct===100?'background:var(--lime);':''}"></div></div></td>
       <td>${p.weeklyDone}/${p.weeklyTotal}</td>
@@ -2058,12 +2169,30 @@ function renderStaffModal(modal){
   head.appendChild(closeBtn()); modal.appendChild(head);
 
   const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;margin-bottom:16px;';
-  const table = document.createElement('table'); table.className='simple'; table.style.minWidth='520px';
-  table.innerHTML = '<thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>';
+  const table = document.createElement('table'); table.className='simple'; table.style.minWidth='640px';
+  table.innerHTML = '<thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Shift end</th><th>Status</th><th></th></tr></thead>';
   const tbody = document.createElement('tbody');
+  const SHIFT_OPTS = [{v:15,l:'3:00 PM (AM shift)'},{v:20,l:'8:00 PM (supervisor)'},{v:23,l:'11:00 PM (PM / straight)'},{v:0,l:'Rest day (no alerts)'}];
   state.staff.forEach(p=>{
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${escapeHtml(p.name)}</td><td style="font-family:var(--font-m)">${escapeHtml(p.username||'—')}</td><td>${p.role}</td><td><span class="badge ${p.active!==false?'ok':'neutral'}">${p.active!==false?'Active':'Deactivated'}</span></td>`;
+    tr.innerHTML = `<td>${escapeHtml(p.name)}</td><td style="font-family:var(--font-m)">${escapeHtml(p.username||'—')}</td><td>${p.role}</td>`;
+    // Shift-end dropdown cell
+    const shiftCell = document.createElement('td');
+    const cur = (p.shift_end_hour != null) ? p.shift_end_hour : 15;
+    const sel = document.createElement('select'); sel.style.cssText='font-size:12px;padding:4px 6px;';
+    sel.innerHTML = SHIFT_OPTS.map(o=>`<option value="${o.v}" ${o.v===cur?'selected':''}>${o.l}</option>`).join('');
+    sel.onchange = async ()=>{
+      try{
+        const {shiftEndHour} = await apiPatch(`/api/staff/${p.id}`, {action:'set-shift', shiftEndHour:Number(sel.value)});
+        p.shift_end_hour = shiftEndHour;
+      }catch(e){ alert(e.message); sel.value = String(cur); }
+    };
+    shiftCell.appendChild(sel);
+    tr.appendChild(shiftCell);
+    // Status cell
+    const statusCell = document.createElement('td');
+    statusCell.innerHTML = `<span class="badge ${p.active!==false?'ok':'neutral'}">${p.active!==false?'Active':'Deactivated'}</span>`;
+    tr.appendChild(statusCell);
     const td = document.createElement('td');
     td.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
     const resetBtn = document.createElement('button'); resetBtn.className='btn sm'; resetBtn.textContent='Reset password';

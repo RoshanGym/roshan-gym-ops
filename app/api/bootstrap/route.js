@@ -28,7 +28,7 @@ export const GET = withApi(async () => {
 
   let staff = [];
   if (tier === 'SuperAdmin') {
-    const { data, error } = await db.from('staff').select('id,name,username,role,active,created_at').order('name');
+    const { data, error } = await db.from('staff').select('id,name,username,role,active,created_at,shift_end_hour').order('name');
     if (error) throw error;
     staff = data;
   }
