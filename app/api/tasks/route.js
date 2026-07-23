@@ -15,11 +15,8 @@ export const GET = withApi(async () => {
 
 export const POST = withApi(async (req) => {
   const session = requireSession();
-  if (session.role !== 'Admin') {
-    const err = new Error('Only Admin accounts log tasks.');
-    err.status = 403;
-    throw err;
-  }
+  // Any signed-in staff member can log an ad-hoc task (including Supervisors
+  // and Owners assigning work to their team).
   const { title, assignee, date, dueDate, notes } = await req.json();
   if (!title || !assignee) {
     const err = new Error('Add a task description and who it is assigned to.');

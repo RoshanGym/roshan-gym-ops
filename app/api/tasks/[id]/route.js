@@ -4,11 +4,7 @@ import { withApi, ok } from '../../../../lib/api';
 
 export const PATCH = withApi(async (req, { params }) => {
   const session = requireSession();
-  if (session.role !== 'Admin') {
-    const err = new Error('Only Admin accounts update tasks.');
-    err.status = 403;
-    throw err;
-  }
+  // Any signed-in staff member can move an ad-hoc task along.
   const { status } = await req.json();
   if (!['To do', 'In progress', 'Done'].includes(status)) {
     const err = new Error('Invalid status.');
