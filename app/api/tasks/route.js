@@ -20,7 +20,7 @@ export const POST = withApi(async (req) => {
     err.status = 403;
     throw err;
   }
-  const { title, assignee, date, notes } = await req.json();
+  const { title, assignee, date, dueDate, notes } = await req.json();
   if (!title || !assignee) {
     const err = new Error('Add a task description and who it is assigned to.');
     err.status = 400;
@@ -30,7 +30,7 @@ export const POST = withApi(async (req) => {
   const id = await newSimpleId('T', 'tasks');
   const { data, error } = await db
     .from('tasks')
-    .insert({ id, title, assignee, date: date || new Date().toISOString().slice(0, 10), notes, status: 'To do', created_by: session.name })
+    .insert({ id, title, assignee, date: date || new Date().toISOString().slice(0, 10), due_date: dueDate || null, notes, status: 'To do', created_by: session.name })
     .select('*')
     .single();
   if (error) throw error;

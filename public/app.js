@@ -35,6 +35,7 @@ let state = {
   promptedUnfinished: false,
   dueInfo: null,
   teamEscalation: null,
+  loginError: null,
   dueBannerDismissed: false,
   _dueTimer: null,
 };
@@ -141,9 +142,9 @@ function mapRequest(r){
     attachments:(r.attachments||[]).map(a=>({id:a.id, name:a.name, mime:a.mime, label:a.label, uploadedBy:a.uploaded_by, uploadedAt:a.uploaded_at})),
   };
 }
-function mapTask(t){ return {id:t.id, title:t.title, assignee:t.assignee, date:t.date, notes:t.notes, status:t.status, createdBy:t.created_by, createdAt:t.created_at, completedBy:t.completed_by, completedAt:t.completed_at}; }
+function mapTask(t){ return {id:t.id, title:t.title, assignee:t.assignee, date:t.date, dueDate:t.due_date||null, notes:t.notes, status:t.status, createdBy:t.created_by, createdAt:t.created_at, completedBy:t.completed_by, completedAt:t.completed_at}; }
 function mapSale(s){ return {id:s.id, date:s.date, category:s.category, description:s.description, amount:Number(s.amount||0), method:s.method, enteredBy:s.entered_by, createdAt:s.created_at}; }
-function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[]}; }
+function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null}; }
 function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
 
 function upsertRequest(mapped){
@@ -171,8 +172,12 @@ async function loadAll(){
     state.staff = data.staff||[];
     state.loaded = {requests:true, tasks:true, sales:true, members:true, staff:true, products:true};
   }catch(e){
-    // session cookie probably expired between calls — send back to login
+    // Could be an expired session — but could also be a real server error
+    // (e.g. a pending database migration). Surface it on the login screen
+    // instead of bouncing silently.
     state.currentUser = null;
+    state.loginError = 'Signed in, but loading your data failed: ' + (e.message || 'unknown error') +
+      ' — if this persists, tell your administrator (a database update may be pending).';
   }
   render();
   maybePromptUnfinished();
@@ -289,6 +294,12 @@ function renderSignIn(){
   const userInput = form.querySelector('#login-username');
   const passInput = form.querySelector('#login-password');
   const errEl = form.querySelector('#login-error');
+  // Show any error carried over from a failed load (e.g. server-side failure
+  // after a successful sign-in), then clear it so it doesn't stick around.
+  if(state.loginError){
+    errEl.innerHTML = `<div class="notice err">${escapeHtml(state.loginError)}</div>`;
+    state.loginError = null;
+  }
 
   async function attemptLogin(){
     const username = userInput.value.trim();
@@ -591,6 +602,26 @@ function renderChecklistView(el){
   const addBtn = document.createElement('button'); addBtn.className='btn primary'; addBtn.textContent='+ Add task';
   addBtn.onclick = ()=>{ state.modal = {type:'addChecklistTask', staffId: viewingStaff, date: state.checklistDate}; render(); };
   bar.appendChild(addBtn);
+  const exBtn = document.createElement('button'); exBtn.className='btn'; exBtn.textContent='Export to Excel';
+  exBtn.onclick = ()=>{
+    if(!state.checklist || !state.checklist.entries.length){ alert('Nothing to export for this date yet.'); return; }
+    const who = state.checklist.entries[0].assignee || 'checklist';
+    const rows = state.checklist.entries.map(t=>({
+      'Assignee': t.assignee,
+      'Frequency': t.frequency,
+      'Period': t.frequency==='Daily' ? t.periodDate : ('Week of ' + t.periodDate),
+      'Section': t.section||'',
+      'Task': t.title,
+      'Category': t.category||'',
+      'Status': t.status,
+      'Completed at': t.completedAt ? fmtDateTime(t.completedAt) : '',
+      'Completed by': t.completedBy||'',
+      'Remarks': t.remarks||'',
+      'Proof files': t.files.length,
+    }));
+    exportRowsToExcel(rows, 'Checklist', 'roshan-checklist-' + who.toLowerCase().replace(/\s+/g,'-'));
+  };
+  bar.appendChild(exBtn);
   el.appendChild(bar);
 
   // Completion deadline notice for the person's own checklist (Admins).
@@ -828,6 +859,27 @@ function renderTeamOverview(el){
   const dateInput = document.createElement('input'); dateInput.type='date'; dateInput.value=state.checklistDate;
   dateInput.onchange = ()=>{ state.checklistDate = dateInput.value || todayStr(); state.checkSummary=null; render(); };
   bar.appendChild(dateInput);
+  const teamExBtn = document.createElement('button'); teamExBtn.className='btn'; teamExBtn.textContent='Export to Excel';
+  teamExBtn.onclick = ()=>{
+    if(!state.checkSummary || !state.checkSummary.perStaff || !state.checkSummary.perStaff.length){ alert('Nothing to export yet.'); return; }
+    const shiftLbl = (h)=> h===0 ? 'Rest day' : ((h>12?(h-12):h) + ':00 ' + (h>=12?'PM':'AM'));
+    const rows = state.checkSummary.perStaff.map(p=>({
+      'Date': state.checkSummary.date,
+      'Employee': p.name,
+      'Shift end': shiftLbl(p.shiftEndHour!=null?p.shiftEndHour:15),
+      'Daily done': p.dailyDone,
+      'Daily total': p.dailyTotal,
+      'Daily open': p.dailyOpen!=null ? p.dailyOpen : (p.dailyTotal-p.dailyDone-p.dailySkipped),
+      'Daily skipped': p.dailySkipped,
+      'Daily %': p.dailyTotal ? Math.round(p.dailyDone/p.dailyTotal*100)+'%' : '',
+      'Weekly done': p.weeklyDone,
+      'Weekly total': p.weeklyTotal,
+      'Last completed': p.lastUpdate ? fmtDateTime(p.lastUpdate) : '',
+      'Escalated': p.escalated ? 'YES' : '',
+    }));
+    exportRowsToExcel(rows, 'Team overview', 'roshan-team-tasks');
+  };
+  bar.appendChild(teamExBtn);
   el.appendChild(bar);
 
   if(!state.checkSummary || state.checkSummary.date !== state.checklistDate){
@@ -906,9 +958,49 @@ function renderTemplatesView(el){
     return;
   }
 
+  if(state.templatesCopyMsg){
+    const ok = document.createElement('div'); ok.className='notice';
+    ok.textContent = state.templatesCopyMsg;
+    el.appendChild(ok);
+    state.templatesCopyMsg = null;
+  }
   const note = document.createElement('div'); note.className='notice';
   note.textContent = "These recurring tasks generate each person's daily and weekly checklist automatically. Edits apply from today onward — past days keep the checklist they were given.";
   el.appendChild(note);
+
+  // --- Copy a checklist from one person to another ---
+  const copyCard = document.createElement('div'); copyCard.className='card';
+  const staffOptions = state.staff.filter(s=>s.active!==false).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+  copyCard.innerHTML = `
+    <h2 style="font-size:13px;color:var(--ink-1);margin-bottom:12px;">Copy a checklist</h2>
+    <div class="hint" style="margin-bottom:10px;">Copies all of one person's active daily and weekly tasks to another — e.g. when a new admin takes the same role. Tasks the target already has are skipped, so nothing gets duplicated.</div>
+    <div class="form-grid">
+      <div class="field"><label>Copy from</label><select id="cp-from">${staffOptions}</select></div>
+      <div class="field"><label>Copy to</label><select id="cp-to">${staffOptions}</select></div>
+    </div>
+    <div id="cp-result"></div>
+  `;
+  const copyRow = document.createElement('div'); copyRow.className='action-row';
+  const copyBtn = document.createElement('button'); copyBtn.className='btn primary'; copyBtn.textContent='Copy checklist';
+  copyBtn.onclick = async ()=>{
+    const fromStaffId = document.getElementById('cp-from').value;
+    const toStaffId = document.getElementById('cp-to').value;
+    const resEl = document.getElementById('cp-result'); resEl.innerHTML='';
+    if(fromStaffId === toStaffId){ resEl.innerHTML='<div class="notice err">Choose two different people.</div>'; return; }
+    const fromName = (state.staff.find(s=>s.id===fromStaffId)||{}).name || 'source';
+    const toName = (state.staff.find(s=>s.id===toStaffId)||{}).name || 'target';
+    if(!confirm('Copy all of ' + fromName + "'s active checklist tasks to " + toName + '? Tasks ' + toName + ' already has will be skipped.')) return;
+    copyBtn.disabled=true; copyBtn.textContent='Copying…';
+    try{
+      const r = await apiPost('/api/templates/copy', {fromStaffId, toStaffId});
+      state.templatesCopyMsg = r.message || ('Copied ' + r.copied + ' task' + (r.copied===1?'':'s') + ' to ' + toName + (r.skipped?(' — ' + r.skipped + ' skipped (already on their list)'):'') + '.');
+      state.templates = null; // force reload so the new list shows below
+      render();
+    }catch(e){ resEl.innerHTML='<div class="notice err">'+escapeHtml(e.message)+'</div>'; copyBtn.disabled=false; copyBtn.textContent='Copy checklist'; }
+  };
+  copyRow.appendChild(copyBtn);
+  copyCard.appendChild(copyRow);
+  el.appendChild(copyCard);
 
   const addCard = document.createElement('div'); addCard.className='card';
   addCard.innerHTML = `
@@ -979,7 +1071,7 @@ function renderAdhocTasks(el){
   const assignees = Array.from(new Set(state.tasks.map(t=>t.assignee))).filter(Boolean).sort();
   const todays = state.tasks.filter(t=>t.date===todayStr());
   const doneToday = todays.filter(t=>t.status==='Done').length;
-  const overdue = state.tasks.filter(t=>t.status!=='Done' && t.date < todayStr()).length;
+  const overdue = state.tasks.filter(t=>t.status!=='Done' && (t.dueDate||t.date) < todayStr()).length;
 
   const metrics = document.createElement('div');
   metrics.className = 'metrics';
@@ -1004,7 +1096,27 @@ function renderAdhocTasks(el){
   `;
   head.innerHTML = '<h2>Task log</h2>';
   head.appendChild(toolbar);
-  if(curRole()==='Admin'){
+  const adhocExBtn=document.createElement('button'); adhocExBtn.className='btn'; adhocExBtn.textContent='Export to Excel';
+  adhocExBtn.onclick=()=>{
+    const rows = state.tasks
+      .slice()
+      .sort((a,b)=> (b.date||'').localeCompare(a.date||''))
+      .map(t=>({
+        'Task #': t.id,
+        'Start date': t.date,
+        'Due date': t.dueDate||'',
+        'Task': t.title,
+        'Assignee': t.assignee||'',
+        'Status': t.status,
+        'Notes': t.notes||'',
+        'Logged by': t.createdBy||'',
+        'Completed by': t.completedBy||'',
+        'Completed at': t.completedAt ? fmtDateTime(t.completedAt) : '',
+      }));
+    exportRowsToExcel(rows, 'Ad-hoc tasks', 'roshan-adhoc-tasks');
+  };
+  toolbar.appendChild(adhocExBtn);
+  {
     const addBtn = document.createElement('button');
     addBtn.className = 'btn primary';
     addBtn.textContent = '+ New task';
@@ -1016,7 +1128,7 @@ function renderAdhocTasks(el){
   toolbar.querySelector('#task-date-filter').onchange = (e)=>{ state.taskFilterDate = e.target.value; renderContent(); };
   toolbar.querySelector('#task-assignee-filter').onchange = (e)=>{ state.taskFilterAssignee = e.target.value; renderContent(); };
 
-  let list = state.tasks.filter(t=> !state.taskFilterDate || t.date===state.taskFilterDate);
+  let list = state.tasks.filter(t=> !state.taskFilterDate || (t.date <= state.taskFilterDate && state.taskFilterDate <= (t.dueDate||t.date)));
   if(state.taskFilterAssignee!=='All') list = list.filter(t=>t.assignee===state.taskFilterAssignee);
   list = [...list].sort((a,b)=> (a.status==='Done')-(b.status==='Done') || a.assignee.localeCompare(b.assignee));
 
@@ -1035,12 +1147,12 @@ function renderAdhocTasks(el){
       <div class="req-top">
         <div>
           <div class="req-title">${escapeHtml(t.title)}</div>
-          <div class="req-sub">${escapeHtml(t.assignee)} &middot; ${fmtDate(t.date)}${t.notes ? ' &middot; ' + escapeHtml(t.notes) : ''}</div>
+          <div class="req-sub">${escapeHtml(t.assignee)} &middot; ${fmtDate(t.date)}${t.dueDate ? ' &rarr; due ' + fmtDate(t.dueDate) : ''}${(t.dueDate && t.status!=='Done' && t.dueDate < todayStr()) ? ' <span class="badge flag">overdue</span>' : ''}${t.notes ? ' &middot; ' + escapeHtml(t.notes) : ''}</div>
         </div>
         <span class="status-pill ${pillClass}">${t.status}</span>
       </div>
     `;
-    if(curRole()==='Admin'){
+    {
       const row = document.createElement('div');
       row.className = 'action-row';
       if(t.status!=='In progress'){
@@ -1069,11 +1181,13 @@ function renderNewTaskModal(modal){
   head.innerHTML = '<h2 style="font-size:16px;">New task</h2>'; head.appendChild(closeBtn());
   modal.appendChild(head);
   const wrap = document.createElement('div');
+  const staffOpts = (state.staff||[]).filter(s=>s.active!==false).map(s=>`<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('');
   wrap.innerHTML = `
     <div class="field"><label>Task</label><input id="t-title" placeholder="e.g. Restock front desk supplies"></div>
     <div class="form-grid">
-      <div class="field"><label>Assigned to</label><input id="t-assignee" placeholder="Staff name"></div>
-      <div class="field"><label>Date</label><input id="t-date" type="date" value="${todayStr()}"></div>
+      <div class="field"><label>Assigned to</label>${staffOpts ? `<select id="t-assignee">${staffOpts}</select>` : `<input id="t-assignee" placeholder="Staff name">`}</div>
+      <div class="field"><label>Start date</label><input id="t-date" type="date" value="${todayStr()}"></div>
+      <div class="field"><label>Due date (target completion)</label><input id="t-due" type="date" value="${todayStr()}"></div>
     </div>
     <div class="field"><label>Notes (optional)</label><input id="t-notes" placeholder="Any detail worth logging"></div>
     <div id="t-error"></div>
@@ -1085,12 +1199,14 @@ function renderNewTaskModal(modal){
     const title = document.getElementById('t-title').value.trim();
     const assignee = document.getElementById('t-assignee').value.trim();
     const date = document.getElementById('t-date').value || todayStr();
+    const dueDate = document.getElementById('t-due').value || date;
     const notes = document.getElementById('t-notes').value.trim();
     const errEl = document.getElementById('t-error');
     if(!title || !assignee){ errEl.innerHTML = '<div class="notice err">Add a task description and who it is assigned to.</div>'; return; }
+    if(dueDate < date){ errEl.innerHTML = '<div class="notice err">The due date cannot be before the start date.</div>'; return; }
     b.disabled=true; b.textContent='Saving…';
     try{
-      const {task} = await apiPost('/api/tasks', {title, assignee, date, notes});
+      const {task} = await apiPost('/api/tasks', {title, assignee, date, dueDate, notes});
       state.tasks.unshift(mapTask(task));
       state.modal = null; render();
     }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add task'; }
@@ -1797,6 +1913,20 @@ function renderSales(el){
   const toolbar = document.createElement('div'); toolbar.className='toolbar';
   toolbar.innerHTML = `<input type="month" id="sales-month" value="${month}">`;
   head.appendChild(toolbar);
+  const salesExBtn=document.createElement('button'); salesExBtn.className='btn'; salesExBtn.textContent='Export to Excel';
+  salesExBtn.onclick=()=>{
+    const rows = monthSales.map(s=>({
+      'Entry #': s.id,
+      'Date': s.date,
+      'Category': s.category,
+      'Description': s.description||'',
+      'Amount (PHP)': s.amount,
+      'Payment method': s.method||'',
+      'Entered by': s.enteredBy||'',
+    }));
+    exportRowsToExcel(rows, 'Sales ' + month, 'roshan-sales-' + month);
+  };
+  toolbar.appendChild(salesExBtn);
   if(curRole()==='Admin'){
     const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ Log sale';
     b.onclick=()=>{ state.modal={type:'newSale'}; render(); };
@@ -1876,11 +2006,13 @@ function renderMembership(el){
     return sum + hist.reduce((s,h)=>s+Number(h.amount||0),0);
   },0);
 
+  const missingForm = state.members.filter(m=>!m.formPath).length;
   const metrics = document.createElement('div'); metrics.className='metrics';
   metrics.innerHTML = `
     <div class="metric good"><div class="num">${active}</div><div class="lbl">Active members</div></div>
     <div class="metric ${expiringSoon>0?'flag':''}"><div class="num">${expiringSoon}</div><div class="lbl">Expiring within 7 days</div></div>
     <div class="metric"><div class="num">${expired}</div><div class="lbl">Expired</div></div>
+    <div class="metric ${missingForm>0?'flag':''}"><div class="num">${missingForm}</div><div class="lbl">Missing membership form</div></div>
     <div class="metric"><div class="num">${fmtMoney(monthRevenue).replace('PHP ','')}</div><div class="lbl">Revenue this month (PHP)</div></div>
   `;
   el.appendChild(metrics);
@@ -1895,6 +2027,35 @@ function renderMembership(el){
     <option value="Expired" ${state.memberFilter==='Expired'?'selected':''}>Expired</option>
   </select>`;
   head.appendChild(toolbar);
+  const exportBtn=document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
+  exportBtn.onclick=()=>{
+    if(typeof XLSX==='undefined'){ alert('The Excel library did not load. Refresh the page.'); return; }
+    if(!withStatus.length){ alert('No members to export yet.'); return; }
+    const data = withStatus.map(m=>({
+      'Member #': m.id,
+      'Name': m.name,
+      'Branch': m.branch||'',
+      'Contact': m.contact||'',
+      'Status (New/Renew)': m.status||'',
+      'Plan': m.plan,
+      'Start date': m.startDate,
+      'Expiry date': m.expiryDate,
+      'Membership status': m.computed,
+      'Amount (PHP)': m.amount,
+      'T-shirt size': m.tshirtSize||'',
+      'Source': m.source||'',
+      'Remarks': m.remarks||'',
+      'Form on file': m.formPath?'Yes':'NO',
+      'Form uploaded by': m.formUploadedBy||'',
+      'Added by': m.createdBy||'',
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws['!cols'] = Object.keys(data[0]).map(k=>({wch: Math.max(k.length+2, 14)}));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Members');
+    XLSX.writeFile(wb, 'roshan-members-' + todayStr() + '.xlsx');
+  };
+  toolbar.appendChild(exportBtn);
   if(curRole()==='Admin'){
     const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ New member';
     b.onclick=()=>{ state.modal={type:'newMember'}; render(); };
@@ -1914,22 +2075,45 @@ function renderMembership(el){
   list.forEach(m=>{
     const card = document.createElement('div'); card.className='card';
     const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
+    const subBits = [m.contact||'—', m.branch||null, m.plan, 'expires '+fmtDate(m.expiryDate), m.tshirtSize?('shirt '+m.tshirtSize):null, m.source||null].filter(Boolean).map(escapeHtml);
     card.innerHTML = `
       <div class="req-top">
         <div>
-          <div class="req-title">${escapeHtml(m.name)}</div>
-          <div class="req-sub">${escapeHtml(m.contact||'—')} &middot; ${escapeHtml(m.plan)} &middot; expires ${fmtDate(m.expiryDate)}</div>
+          <div class="req-title">${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge flag">no form on file</span>'}</div>
+          <div class="req-sub">${subBits.join(' &middot; ')}</div>
         </div>
         <span class="badge ${badgeClass}">${m.computed}</span>
       </div>
     `;
+    const row = document.createElement('div'); row.className='action-row';
+    if(m.formPath){
+      const vf = document.createElement('button'); vf.className='btn sm'; vf.textContent='📄 View form';
+      vf.onclick = ()=>window.open(`/api/members/${m.id}/form`, '_blank');
+      row.appendChild(vf);
+    }
     if(curRole()==='Admin'){
-      const row = document.createElement('div'); row.className='action-row';
       const b = document.createElement('button'); b.className='btn primary sm'; b.textContent='Renew';
       b.onclick=()=>{ state.modal={type:'renewMember', id:m.id}; render(); };
       row.appendChild(b);
-      card.appendChild(row);
+      // Upload (or replace) the scanned form
+      const fileInput = document.createElement('input');
+      fileInput.type='file'; fileInput.accept='image/png,image/jpeg,application/pdf'; fileInput.style.display='none';
+      const upBtn = document.createElement('button'); upBtn.className='btn sm' + (m.formPath?' ghost':''); upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
+      fileInput.onchange = async ()=>{
+        const file = fileInput.files[0];
+        if(!file) return;
+        upBtn.disabled=true; upBtn.textContent='Uploading…';
+        try{
+          const {member} = await apiUpload(`/api/members/${m.id}/form`, file, 'Membership form');
+          const i = state.members.findIndex(x=>x.id===m.id);
+          if(i>=0) state.members[i] = mapMember(member);
+          render();
+        }catch(e){ alert(e.message); upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form'; }
+      };
+      upBtn.onclick = ()=>fileInput.click();
+      row.appendChild(upBtn); row.appendChild(fileInput);
     }
+    if(row.children.length) card.appendChild(row);
     el.appendChild(card);
   });
 }
@@ -1938,16 +2122,154 @@ function renderNewMemberModal(modal){
   const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">New member</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
   const wrap = document.createElement('div');
   wrap.innerHTML = `
+    <div class="notice">Step 1: attach the scanned membership form (PNG, JPG, or PDF) — <strong>required</strong>. The system will read it and fill in what it can; review and correct the details, then save.</div>
+    <div class="field full"><label>Membership form (scan or photo) — required</label><input id="m-form-file" type="file" accept="image/png,image/jpeg,application/pdf"></div>
+    <div id="m-form-preview" style="display:none;margin:0 0 12px;"></div>
+    <div class="action-row" style="margin:2px 0 14px;">
+      <button class="btn sm" id="m-scan-btn" type="button">🔍 Re-scan form</button>
+      <span class="hint" id="m-scan-status"></span>
+    </div>
     <div class="form-grid">
       <div class="field full"><label>Name</label><input id="m-name" placeholder="Full name"></div>
       <div class="field"><label>Contact</label><input id="m-contact" placeholder="Phone or email"></div>
-      <div class="field"><label>Plan</label><select id="m-plan">${Object.keys(PLAN_MONTHS).map(p=>`<option value="${p}">${p}</option>`).join('')}</select></div>
+      <div class="field"><label>Branch</label><select id="m-branch"><option>Manila</option><option>Malabon</option></select></div>
+      <div class="field"><label>Status</label><select id="m-status"><option>New</option><option>Renew</option></select></div>
+      <div class="field"><label>Plan</label><select id="m-plan">${Object.keys(PLAN_MONTHS).map(p=>`<option value="${p}" ${p==='Annual'?'selected':''}>${p}</option>`).join('')}</select></div>
       <div class="field"><label>Start date</label><input id="m-start" type="date" value="${todayStr()}"></div>
-      <div class="field"><label>Amount paid (PHP)</label><input id="m-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+      <div class="field"><label>Amount paid (PHP)</label><input id="m-amount" type="number" min="0" step="0.01" value="600" placeholder="0.00"></div>
+      <div class="field"><label>T-shirt size</label><select id="m-tshirt"><option value="">—</option><option>Small</option><option>Medium</option><option>Large</option><option>XL</option><option>XXL</option></select></div>
+      <div class="field"><label>Source</label><select id="m-source"><option value="">—</option><option>Walk-in</option><option>Online Inquiries</option><option>Referral</option><option>Old Client</option><option>Facebook</option><option>Other</option></select></div>
+      <div class="field full"><label>Remarks (optional)</label><input id="m-remarks" placeholder="e.g. with pic, done text"></div>
     </div>
     <div id="m-error"></div>
   `;
   modal.appendChild(wrap);
+
+  // --- OCR auto-fill: runs automatically when a file is chosen ---
+  // (Printed text reads well; handwriting is best-effort — always review.)
+  const scanBtn = wrap.querySelector('#m-scan-btn');
+  const scanStatus = wrap.querySelector('#m-scan-status');
+  const setVal = (id, v)=>{
+    if(v!=null && String(v).trim()!==''){
+      const el=document.getElementById(id);
+      if(el){
+        el.value = v;
+        // Mark as machine-filled so the admin knows to verify it against the
+        // scan. The highlight clears the moment they edit the field.
+        el.classList.add('ai-filled');
+        el.addEventListener('input', ()=>el.classList.remove('ai-filled'), {once:true});
+        el.addEventListener('change', ()=>el.classList.remove('ai-filled'), {once:true});
+        return 1;
+      }
+    }
+    return 0;
+  };
+
+  const showPreview = (file)=>{
+    const pv = wrap.querySelector('#m-form-preview');
+    pv.innerHTML = ''; pv.style.display = '';
+    if(file.type === 'application/pdf'){
+      pv.innerHTML = '<div class="hint">PDF attached: ' + escapeHtml(file.name) + ' — open it beside this window to compare while reviewing.</div>';
+      return;
+    }
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(file);
+    img.style.cssText = 'max-width:100%;max-height:340px;border:1px solid var(--line);border-radius:8px;display:block;';
+    img.title = 'Compare the handwriting here against the highlighted fields below';
+    const cap = document.createElement('div'); cap.className='hint'; cap.style.marginTop='6px';
+    cap.textContent = 'Compare the form against the highlighted fields below — highlights clear as you confirm/edit each one.';
+    pv.appendChild(img); pv.appendChild(cap);
+  };
+
+  const aiScan = async (file)=>{
+    // Try the server-side AI reader first (reads handwriting well).
+    scanStatus.textContent = 'Reading the form with AI\u2026 usually 5\u201315 seconds.';
+    const fd = new FormData(); fd.append('file', file);
+    const res = await fetch('/api/members/scan', {method:'POST', body:fd});
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error || 'AI reading failed.');
+    if(!data.available) return null; // no API key configured \u2014 caller falls back
+    const f = data.fields || {};
+    let filled = 0;
+    const nameV = [f.firstName, f.lastName].filter(Boolean).join(' ');
+    filled += setVal('m-name', nameV || null);
+    const contactV = [f.contactNumber, f.email].filter(Boolean).join(' / ');
+    filled += setVal('m-contact', contactV || null);
+    filled += setVal('m-start', f.startDate || null);
+    if(f.branch === 'Manila' || f.branch === 'Malabon'){ document.getElementById('m-branch').value = f.branch; filled++; }
+    if(f.source){ const sel = document.getElementById('m-source'); if([...sel.options].some(o=>o.value===f.source)){ sel.value = f.source; filled++; } }
+    if(f.address){ const rEl = document.getElementById('m-remarks'); if(rEl && !rEl.value) rEl.value = 'Address: ' + f.address; }
+    return filled;
+  };
+
+  const basicScan = async (file)=>{
+    // Fallback: on-device OCR (printed labels read fine; handwriting is best-effort).
+    if(file.type === 'application/pdf'){ scanStatus.textContent = 'The basic reader works on images only \u2014 the PDF will still be saved as the form copy. Fill the fields manually, or configure the AI reader for PDFs.'; return null; }
+    if(typeof Tesseract === 'undefined'){
+      await new Promise((res, rej)=>{
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js';
+        s.onload = res; s.onerror = ()=>rej(new Error('Could not load the text reader. Check your internet connection.'));
+        document.head.appendChild(s);
+      });
+    }
+    scanStatus.textContent = 'Reading the form\u2026 this can take ~20 seconds.';
+    const result = await Tesseract.recognize(file, 'eng');
+    const text = (result && result.data && result.data.text) || '';
+    const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+    let filled = 0;
+    const grab = (labels)=>{
+      for(const line of lines){
+        for(const lab of labels){
+          const rx = new RegExp('^\\s*' + lab + '\\s*[:\\-]?\\s*(.+)$', 'i');
+          const m = line.match(rx);
+          if(m && m[1] && m[1].trim().length > 1) return m[1].trim();
+        }
+      }
+      return null;
+    };
+    const lastName = grab(['last name']);
+    const firstName = grab(['first name']);
+    let nameV = (firstName || lastName) ? [firstName, lastName].filter(Boolean).join(' ') : grab(['full name','member name','name']);
+    filled += setVal('m-name', nameV);
+    const phoneV = grab(['contact number','contact no','contact','mobile','phone','cellphone','cp no']) ||
+      (text.match(/09\d{9}|\+639\d{9}/) || [null])[0];
+    const emailV = grab(['email address','email']) ||
+      (text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/) || [null])[0];
+    filled += setVal('m-contact', [phoneV, emailV].filter(Boolean).join(' / ') || null);
+    return filled;
+  };
+
+  const runScan = async ()=>{
+    const fileInput = wrap.querySelector('#m-form-file');
+    const file = fileInput.files[0];
+    if(!file){ scanStatus.textContent = 'Choose the form file first.'; return; }
+    showPreview(file);
+    scanBtn.disabled = true;
+    try{
+      let filled = null;
+      try{
+        filled = await aiScan(file);
+      }catch(aiErr){
+        scanStatus.textContent = aiErr.message + ' Falling back to the basic reader\u2026';
+        filled = null;
+      }
+      if(filled === null){
+        filled = await basicScan(file);
+      }
+      if(filled !== null){
+        scanStatus.textContent = filled
+          ? 'Filled ' + filled + ' field' + (filled===1?'':'s') + ' from the form \u2014 glance over them, then save.'
+          : 'Could not confidently read the details. Fill the fields manually \u2014 the form file will still be saved.';
+      }
+    }catch(e){
+      scanStatus.textContent = e.message || 'Reading failed \u2014 fill the fields manually.';
+    }
+    scanBtn.disabled = false;
+  };
+  scanBtn.onclick = runScan;
+  wrap.querySelector('#m-form-file').onchange = runScan; // auto-fill starts the moment a file is attached
+
   const row=document.createElement('div'); row.className='action-row';
   const b=document.createElement('button'); b.className='btn primary'; b.textContent='Add member';
   b.onclick=async ()=>{
@@ -1956,12 +2278,33 @@ function renderNewMemberModal(modal){
     const plan=document.getElementById('m-plan').value;
     const start=document.getElementById('m-start').value || todayStr();
     const amount=parseFloat(document.getElementById('m-amount').value)||0;
+    const branch=document.getElementById('m-branch').value;
+    const status=document.getElementById('m-status').value;
+    const tshirtSize=document.getElementById('m-tshirt').value;
+    const source=document.getElementById('m-source').value;
+    const remarks=document.getElementById('m-remarks').value.trim();
+    const formFile=wrap.querySelector('#m-form-file').files[0] || null;
     const errEl=document.getElementById('m-error'); errEl.innerHTML='';
+    if(!formFile){ errEl.innerHTML='<div class="notice err">The scanned membership form is required. Attach the PNG, JPG, or PDF before saving — a member cannot be added without their form on file.</div>'; return; }
     if(!name){ errEl.innerHTML='<div class="notice err">Enter a name for this member.</div>'; return; }
     b.disabled=true; b.textContent='Saving…';
     try{
-      const {member} = await apiPost('/api/members', {name, contact, plan, startDate:start, amount});
-      state.members.push(mapMember(member));
+      const fd = new FormData();
+      fd.append('file', formFile);
+      fd.append('name', name);
+      fd.append('contact', contact);
+      fd.append('plan', plan);
+      fd.append('startDate', start);
+      fd.append('amount', String(amount));
+      fd.append('branch', branch);
+      fd.append('status', status);
+      fd.append('tshirtSize', tshirtSize);
+      fd.append('source', source);
+      fd.append('remarks', remarks);
+      const res = await fetch('/api/members', {method:'POST', body:fd});
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+      state.members.push(mapMember(data.member));
       state.modal=null; render();
     }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add member'; }
   };
@@ -2037,6 +2380,16 @@ function requestToExportRow(r){
     'Files attached': (r.attachments||[]).length,
     'Notes': r.notes || '',
   };
+}
+
+function exportRowsToExcel(rows, sheetName, filePrefix){
+  if(typeof XLSX === 'undefined'){ alert('The Excel library did not load. Check your internet connection and refresh the page.'); return; }
+  if(!rows.length){ alert('Nothing to export yet.'); return; }
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = Object.keys(rows[0]).map(k=>({wch: Math.max(k.length+2, 14)}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0,31));
+  XLSX.writeFile(wb, `${filePrefix}-${todayStr()}.xlsx`);
 }
 
 function exportRequestsToExcel(rows, sheetName, filePrefix){
