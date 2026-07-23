@@ -4,7 +4,7 @@ import { withApi, ok } from '../../../../../lib/api';
 
 export const dynamic = 'force-dynamic';
 
-const MAX_BYTES = 8 * 1024 * 1024; // scanned forms can be larger than receipts
+const MAX_BYTES = 4 * 1024 * 1024; // scanned forms can be larger than receipts
 const ALLOWED = ['image/png', 'image/jpeg', 'image/jpg', 'application/pdf'];
 
 // Upload (or replace) the scanned membership form for a member.

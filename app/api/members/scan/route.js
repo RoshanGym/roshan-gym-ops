@@ -3,7 +3,7 @@ import { withApi, ok } from '../../../../lib/api';
 
 export const dynamic = 'force-dynamic';
 
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 4 * 1024 * 1024;
 
 // Reads a scanned Roshan membership form with AI vision and returns the
 // member fields as structured data. Requires ANTHROPIC_API_KEY in the

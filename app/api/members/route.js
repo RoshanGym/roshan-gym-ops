@@ -6,7 +6,7 @@ import { withApi, ok } from '../../../lib/api';
 export const dynamic = 'force-dynamic';
 
 const PLAN_MONTHS = { Monthly: 1, Quarterly: 3, Annual: 12, 'Class pack': 0 };
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 4 * 1024 * 1024;
 const ALLOWED = ['image/png', 'image/jpeg', 'image/jpg', 'application/pdf'];
 
 export const GET = withApi(async () => {

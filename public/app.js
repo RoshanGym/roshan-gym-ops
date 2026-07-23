@@ -2190,9 +2190,15 @@ function renderMembership(el){
       fileInput.type='file'; fileInput.accept='image/png,image/jpeg,application/pdf'; fileInput.style.display='none';
       const upBtn = document.createElement('button'); upBtn.className='btn sm' + (m.formPath?' ghost':''); upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
       fileInput.onchange = async ()=>{
-        const file = fileInput.files[0];
-        if(!file) return;
+        const picked = fileInput.files[0];
+        if(!picked) return;
         upBtn.disabled=true; upBtn.textContent='Uploading…';
+        const file = await compressImageFile(picked);
+        if(file.size > UPLOAD_LIMIT_BYTES){
+          alert('That file is ' + (file.size/1024/1024).toFixed(1) + 'MB, over the 4MB upload limit. Re-scan it as a JPG/PNG photo or at a lower resolution.');
+          upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
+          return;
+        }
         try{
           const {member} = await apiUpload(`/api/members/${m.id}/form`, file, 'Membership form');
           const i = state.members.findIndex(x=>x.id===m.id);
@@ -2206,6 +2212,31 @@ function renderMembership(el){
     if(row.children.length) card.appendChild(row);
     el.appendChild(card);
   });
+}
+
+// Vercel rejects request bodies over ~4.5MB, so shrink large photos in the
+// browser before uploading. Scans/photos compress dramatically with no
+// meaningful loss of legibility for reading a form.
+const UPLOAD_LIMIT_BYTES = 4 * 1024 * 1024;
+
+async function compressImageFile(file, maxDim = 2000, quality = 0.82){
+  if(!file.type.startsWith('image/')) return file; // PDFs pass through
+  if(file.size <= 900 * 1024) return file;         // already small enough
+  try{
+    const bitmap = await createImageBitmap(file);
+    let {width, height} = bitmap;
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+    width = Math.round(width * scale); height = Math.round(height * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, width, height);
+    const blob = await new Promise(res=>canvas.toBlob(res, 'image/jpeg', quality));
+    if(!blob || blob.size >= file.size) return file;
+    const newName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+    return new File([blob], newName, {type:'image/jpeg'});
+  }catch(e){
+    return file; // if anything goes wrong, fall back to the original
+  }
 }
 
 function renderNewMemberModal(modal){
@@ -2239,6 +2270,8 @@ function renderNewMemberModal(modal){
   // (Printed text reads well; handwriting is best-effort — always review.)
   const scanBtn = wrap.querySelector('#m-scan-btn');
   const scanStatus = wrap.querySelector('#m-scan-status');
+  // Holds the (possibly compressed) file that will actually be saved.
+  let memberFormFile = null;
   const setVal = (id, v)=>{
     if(v!=null && String(v).trim()!==''){
       const el=document.getElementById(id);
@@ -2273,9 +2306,15 @@ function renderNewMemberModal(modal){
 
   const aiScan = async (file)=>{
     // Try the server-side AI reader first (reads handwriting well).
+    if(file.size > UPLOAD_LIMIT_BYTES){
+      throw new Error('This file is ' + (file.size/1024/1024).toFixed(1) + 'MB — too large to read (limit 4MB).');
+    }
     scanStatus.textContent = 'Reading the form with AI\u2026 usually 5\u201315 seconds.';
     const fd = new FormData(); fd.append('file', file);
     const res = await fetch('/api/members/scan', {method:'POST', body:fd});
+    if(res.status === 413){
+      throw new Error('The file is too large for the reader (limit about 4MB).');
+    }
     const data = await res.json().catch(()=>({}));
     if(!res.ok) throw new Error(data.error || 'AI reading failed.');
     if(!data.available) return null; // no API key configured \u2014 caller falls back
@@ -2332,10 +2371,29 @@ function renderNewMemberModal(modal){
 
   const runScan = async ()=>{
     const fileInput = wrap.querySelector('#m-form-file');
-    const file = fileInput.files[0];
-    if(!file){ scanStatus.textContent = 'Choose the form file first.'; return; }
-    showPreview(file);
+    const original = fileInput.files[0];
+    if(!original){ scanStatus.textContent = 'Choose the form file first.'; return; }
     scanBtn.disabled = true;
+    showPreview(original);
+
+    // Shrink large photos so both the reader and the save request stay under
+    // the upload limit. The compressed copy is what gets stored.
+    let file = original;
+    if(original.type.startsWith('image/') && original.size > UPLOAD_LIMIT_BYTES/2){
+      scanStatus.textContent = 'Optimising the image\u2026';
+      file = await compressImageFile(original);
+    }
+    memberFormFile = file;
+
+    if(file.size > UPLOAD_LIMIT_BYTES){
+      scanStatus.textContent = 'This file is ' + (file.size/1024/1024).toFixed(1) + 'MB, over the 4MB limit. ' +
+        (file.type === 'application/pdf'
+          ? 'Re-scan the form as a JPG/PNG photo, or export the PDF at a lower resolution.'
+          : 'Try a lower-resolution scan.');
+      scanBtn.disabled = false;
+      return;
+    }
+
     try{
       let filled = null;
       try{
@@ -2373,11 +2431,20 @@ function renderNewMemberModal(modal){
     const tshirtSize=document.getElementById('m-tshirt').value;
     const source=document.getElementById('m-source').value;
     const remarks=document.getElementById('m-remarks').value.trim();
-    const formFile=wrap.querySelector('#m-form-file').files[0] || null;
+    const picked = wrap.querySelector('#m-form-file').files[0] || null;
     const errEl=document.getElementById('m-error'); errEl.innerHTML='';
-    if(!formFile){ errEl.innerHTML='<div class="notice err">The scanned membership form is required. Attach the PNG, JPG, or PDF before saving — a member cannot be added without their form on file.</div>'; return; }
+    if(!picked){ errEl.innerHTML='<div class="notice err">The scanned membership form is required. Attach the PNG, JPG, or PDF before saving — a member cannot be added without their form on file.</div>'; return; }
     if(!name){ errEl.innerHTML='<div class="notice err">Enter a name for this member.</div>'; return; }
     b.disabled=true; b.textContent='Saving…';
+    // Use the compressed copy if we made one; otherwise compress now.
+    let formFile = memberFormFile || picked;
+    if(formFile === picked && picked.type.startsWith('image/') && picked.size > UPLOAD_LIMIT_BYTES/2){
+      formFile = await compressImageFile(picked);
+    }
+    if(formFile.size > UPLOAD_LIMIT_BYTES){
+      errEl.innerHTML = `<div class="notice err">This form file is ${(formFile.size/1024/1024).toFixed(1)}MB, over the 4MB upload limit. Re-scan it as a JPG/PNG photo or at a lower resolution, then try again.</div>`;
+      b.disabled=false; b.textContent='Add member'; return;
+    }
     try{
       const fd = new FormData();
       fd.append('file', formFile);
@@ -2392,6 +2459,7 @@ function renderNewMemberModal(modal){
       fd.append('source', source);
       fd.append('remarks', remarks);
       const res = await fetch('/api/members', {method:'POST', body:fd});
+      if(res.status === 413) throw new Error('The form file is too large to upload (limit about 4MB). Re-scan it smaller and try again.');
       const data = await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(data.error || 'Something went wrong.');
       state.members.push(mapMember(data.member));
