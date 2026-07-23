@@ -1068,7 +1068,7 @@ function renderTemplatesView(el){
 }
 
 function renderAdhocTasks(el){
-  const assignees = Array.from(new Set(state.tasks.map(t=>t.assignee))).filter(Boolean).sort();
+  const assignees = Array.from(new Set(state.tasks.flatMap(t=>String(t.assignee||'').split(',').map(s=>s.trim())))).filter(Boolean).sort();
   const todays = state.tasks.filter(t=>t.date===todayStr());
   const doneToday = todays.filter(t=>t.status==='Done').length;
   const overdue = state.tasks.filter(t=>t.status!=='Done' && (t.dueDate||t.date) < todayStr()).length;
@@ -1106,10 +1106,10 @@ function renderAdhocTasks(el){
         'Start date': t.date,
         'Due date': t.dueDate||'',
         'Task': t.title,
-        'Assignee': t.assignee||'',
+        'Owner(s)': t.assignee||'',
         'Status': t.status,
         'Notes': t.notes||'',
-        'Logged by': t.createdBy||'',
+        'Assigned by': t.createdBy||'',
         'Completed by': t.completedBy||'',
         'Completed at': t.completedAt ? fmtDateTime(t.completedAt) : '',
       }));
@@ -1129,7 +1129,7 @@ function renderAdhocTasks(el){
   toolbar.querySelector('#task-assignee-filter').onchange = (e)=>{ state.taskFilterAssignee = e.target.value; renderContent(); };
 
   let list = state.tasks.filter(t=> !state.taskFilterDate || (t.date <= state.taskFilterDate && state.taskFilterDate <= (t.dueDate||t.date)));
-  if(state.taskFilterAssignee!=='All') list = list.filter(t=>t.assignee===state.taskFilterAssignee);
+  if(state.taskFilterAssignee!=='All') list = list.filter(t=>String(t.assignee||'').split(',').map(s=>s.trim()).includes(state.taskFilterAssignee));
   list = [...list].sort((a,b)=> (a.status==='Done')-(b.status==='Done') || a.assignee.localeCompare(b.assignee));
 
   if(list.length===0){
@@ -1142,11 +1142,19 @@ function renderAdhocTasks(el){
     const card = document.createElement('div');
     card.className = 'card';
     const pillClass = t.status==='Done' ? 'done' : t.status==='In progress' ? 'progress' : 'todo';
+    const owners = String(t.assignee||'').split(',').map(s=>s.trim()).filter(Boolean);
+    const isOverdue = t.dueDate && t.status!=='Done' && t.dueDate < todayStr();
     card.innerHTML = `
       <div class="req-top">
-        <div>
+        <div style="flex:1;min-width:0;">
           <div class="req-title">${escapeHtml(t.title)}</div>
-          <div class="req-sub">${escapeHtml(t.assignee)} &middot; ${fmtDate(t.date)}${t.dueDate ? ' &rarr; due ' + fmtDate(t.dueDate) : ''}${(t.dueDate && t.status!=='Done' && t.dueDate < todayStr()) ? ' <span class="badge flag">overdue</span>' : ''}${t.notes ? ' &middot; ' + escapeHtml(t.notes) : ''}</div>
+          <div class="req-sub">
+            <strong>${owners.length>1?'Owners':'Owner'}:</strong> ${escapeHtml(owners.join(', ')||'—')}
+            &middot; <strong>Assigned by:</strong> ${escapeHtml(t.createdBy||'—')}
+          </div>
+          <div class="req-sub">
+            ${fmtDate(t.date)}${t.dueDate ? ' &rarr; due ' + fmtDate(t.dueDate) : ''}${isOverdue ? ' <span class="badge flag">overdue</span>' : ''}${t.status==='Done'&&t.completedBy ? ' &middot; done by ' + escapeHtml(t.completedBy) : ''}${t.notes ? ' &middot; ' + escapeHtml(t.notes) : ''}
+          </div>
         </div>
         <span class="status-pill ${pillClass}">${t.status}</span>
       </div>
@@ -1154,25 +1162,91 @@ function renderAdhocTasks(el){
     {
       const row = document.createElement('div');
       row.className = 'action-row';
-      if(t.status!=='In progress'){
+      if(t.status!=='In progress' && t.status!=='Done'){
         const b = document.createElement('button'); b.className='btn sm'; b.textContent='Mark in progress';
-        b.onclick = async ()=>{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'In progress'}); Object.assign(t, mapTask(task)); render(); };
+        b.onclick = async ()=>{ try{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'In progress'}); Object.assign(t, mapTask(task)); render(); }catch(e){ alert(e.message); } };
         row.appendChild(b);
       }
       if(t.status!=='Done'){
         const b = document.createElement('button'); b.className='btn sm primary'; b.textContent='Mark done';
-        b.onclick = async ()=>{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'Done'}); Object.assign(t, mapTask(task)); render(); };
+        b.onclick = async ()=>{ try{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'Done'}); Object.assign(t, mapTask(task)); render(); }catch(e){ alert(e.message); } };
         row.appendChild(b);
       }
       if(t.status==='Done'){
         const b = document.createElement('button'); b.className='btn sm ghost'; b.textContent='Reopen';
-        b.onclick = async ()=>{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'To do'}); Object.assign(t, mapTask(task)); render(); };
+        b.onclick = async ()=>{ try{ const {task}=await apiPatch(`/api/tasks/${t.id}`, {status:'To do'}); Object.assign(t, mapTask(task)); render(); }catch(e){ alert(e.message); } };
         row.appendChild(b);
       }
+      const ed = document.createElement('button'); ed.className='btn sm'; ed.textContent='Edit';
+      ed.onclick = ()=>{ state.modal={type:'editTask', id:t.id}; render(); };
+      row.appendChild(ed);
+      const del = document.createElement('button'); del.className='btn sm ghost'; del.textContent='Delete';
+      del.onclick = async ()=>{
+        if(!confirm('Delete this task?\n\n"' + t.title + '"\n\nThis cannot be undone.')) return;
+        try{
+          await apiDelete(`/api/tasks/${t.id}`);
+          state.tasks = state.tasks.filter(x=>x.id!==t.id);
+          render();
+        }catch(e){ alert(e.message); }
+      };
+      row.appendChild(del);
       card.appendChild(row);
     }
     el.appendChild(card);
   });
+}
+
+function renderEditTaskModal(modal){
+  const t = state.tasks.find(x=>x.id===state.modal.id);
+  if(!t){ state.modal=null; return; }
+  const head = document.createElement('div'); head.className='modal-head';
+  head.innerHTML = '<h2 style="font-size:16px;">Edit task</h2>'; head.appendChild(closeBtn());
+  modal.appendChild(head);
+  const wrap = document.createElement('div');
+  const activeStaff = (state.staff||[]).filter(s=>s.active!==false);
+  const current = String(t.assignee||'').split(',').map(s=>s.trim()).filter(Boolean);
+  // Keep any owner who is no longer in the active staff list so editing
+  // doesn't silently drop them.
+  const extra = current.filter(n=>!activeStaff.some(s=>s.name===n));
+  const checkList = [...activeStaff.map(s=>s.name), ...extra];
+  wrap.innerHTML = `
+    <div class="hint" style="margin-bottom:12px;">Assigned by ${escapeHtml(t.createdBy||'—')} &middot; task ${escapeHtml(t.id)}</div>
+    <div class="field"><label>Task</label><input id="e-title" value="${escapeHtml(t.title)}"></div>
+    <div class="field full"><label>Assigned to</label>
+      <div id="e-assignees" style="display:flex;flex-wrap:wrap;gap:10px 16px;max-height:150px;overflow-y:auto;padding:10px 12px;border:1px solid var(--line);border-radius:8px;">
+        ${checkList.map(n=>`<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-0);cursor:pointer;">
+          <input type="checkbox" class="e-assignee-cb" value="${escapeHtml(n)}" ${current.includes(n)?'checked':''}> ${escapeHtml(n)}
+        </label>`).join('')}
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="field"><label>Start date</label><input id="e-date" type="date" value="${t.date||todayStr()}"></div>
+      <div class="field"><label>Due date</label><input id="e-due" type="date" value="${t.dueDate||t.date||todayStr()}"></div>
+    </div>
+    <div class="field"><label>Notes</label><input id="e-notes" value="${escapeHtml(t.notes||'')}" placeholder="Any detail worth logging"></div>
+    <div id="e-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Save changes';
+  b.onclick = async ()=>{
+    const title = document.getElementById('e-title').value.trim();
+    const owners = [...document.querySelectorAll('.e-assignee-cb')].filter(c=>c.checked).map(c=>c.value);
+    const date = document.getElementById('e-date').value || t.date;
+    const dueDate = document.getElementById('e-due').value || date;
+    const notes = document.getElementById('e-notes').value.trim();
+    const errEl = document.getElementById('e-error'); errEl.innerHTML='';
+    if(!title){ errEl.innerHTML='<div class="notice err">The task description cannot be empty.</div>'; return; }
+    if(!owners.length){ errEl.innerHTML='<div class="notice err">Tick at least one owner.</div>'; return; }
+    if(dueDate < date){ errEl.innerHTML='<div class="notice err">The due date cannot be before the start date.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {task} = await apiPatch(`/api/tasks/${t.id}`, {title, assignee:owners.join(', '), date, dueDate, notes});
+      Object.assign(t, mapTask(task));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Save changes'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
 }
 
 function renderNewTaskModal(modal){
@@ -1187,7 +1261,7 @@ function renderNewTaskModal(modal){
           <input type="checkbox" class="t-assignee-cb" value="${escapeHtml(s.name)}"> ${escapeHtml(s.name)}
         </label>`).join('')}
       </div>
-      <div class="hint" style="margin-top:6px;">Tick everyone responsible — each person gets their own copy to mark done, so you can see who has finished.</div>`
+      <div class="hint" style="margin-top:6px;">Tick everyone responsible — they share one task between them.</div>`
     : `<input id="t-assignee-free" placeholder="Staff name">`;
   wrap.innerHTML = `
     <div class="field"><label>Task</label><input id="t-title" placeholder="e.g. Restock front desk supplies"></div>
@@ -1215,23 +1289,16 @@ function renderNewTaskModal(modal){
     if(!title){ errEl.innerHTML = '<div class="notice err">Add a task description.</div>'; return; }
     if(!assignees.length){ errEl.innerHTML = '<div class="notice err">Tick at least one person to assign this task to.</div>'; return; }
     if(dueDate < date){ errEl.innerHTML = '<div class="notice err">The due date cannot be before the start date.</div>'; return; }
-    b.disabled=true; b.textContent = assignees.length>1 ? `Saving ${assignees.length} tasks…` : 'Saving…';
-    const created = [];
-    const failed = [];
-    for(const assignee of assignees){
-      try{
-        const {task} = await apiPost('/api/tasks', {title, assignee, date, dueDate, notes});
-        created.push(mapTask(task));
-      }catch(e){ failed.push(assignee + ' (' + e.message + ')'); }
-    }
-    created.forEach(t=>state.tasks.unshift(t));
-    if(failed.length){
-      errEl.innerHTML = `<div class="notice err">Saved for ${created.length}, but failed for: ${escapeHtml(failed.join('; '))}</div>`;
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      // One task, however many owners — they share the single line item.
+      const {task} = await apiPost('/api/tasks', {title, assignee: assignees.join(', '), date, dueDate, notes});
+      state.tasks.unshift(mapTask(task));
+      state.modal = null; render();
+    }catch(e){
+      errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`;
       b.disabled=false; b.textContent='Add task';
-      render();
-      return;
     }
-    state.modal = null; render();
   };
   row.appendChild(b); modal.appendChild(row);
 }
@@ -2078,7 +2145,7 @@ function renderMembership(el){
     XLSX.writeFile(wb, 'roshan-members-' + todayStr() + '.xlsx');
   };
   toolbar.appendChild(exportBtn);
-  if(curRole()==='Admin'){
+  if(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin'){
     const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ New member';
     b.onclick=()=>{ state.modal={type:'newMember'}; render(); };
     toolbar.appendChild(b);
@@ -2113,7 +2180,7 @@ function renderMembership(el){
       vf.onclick = ()=>window.open(`/api/members/${m.id}/form`, '_blank');
       row.appendChild(vf);
     }
-    if(curRole()==='Admin'){
+    if(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin'){
       const b = document.createElement('button'); b.className='btn primary sm'; b.textContent='Renew';
       b.onclick=()=>{ state.modal={type:'renewMember', id:m.id}; render(); };
       row.appendChild(b);
@@ -2813,6 +2880,7 @@ function renderModal(){
   if(state.modal.type==='unfinishedPrompt') return renderUnfinishedPromptModal(modal);
   if(state.modal.type==='addChecklistTask') return renderAddChecklistTaskModal(modal);
   if(state.modal.type==='newTask') return renderNewTaskModal(modal);
+  if(state.modal.type==='editTask') return renderEditTaskModal(modal);
   if(state.modal.type==='newSale') return renderNewSaleModal(modal);
   if(state.modal.type==='newMember') return renderNewMemberModal(modal);
   if(state.modal.type==='renewMember') return renderRenewMemberModal(modal);
