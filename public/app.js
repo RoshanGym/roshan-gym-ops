@@ -1180,11 +1180,19 @@ function renderNewTaskModal(modal){
   head.innerHTML = '<h2 style="font-size:16px;">New task</h2>'; head.appendChild(closeBtn());
   modal.appendChild(head);
   const wrap = document.createElement('div');
-  const staffOpts = (state.staff||[]).filter(s=>s.active!==false).map(s=>`<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('');
+  const activeStaff = (state.staff||[]).filter(s=>s.active!==false);
+  const staffChecks = activeStaff.length
+    ? `<div id="t-assignees" style="display:flex;flex-wrap:wrap;gap:10px 16px;max-height:150px;overflow-y:auto;padding:10px 12px;border:1px solid var(--line);border-radius:8px;">
+        ${activeStaff.map(s=>`<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-0);cursor:pointer;">
+          <input type="checkbox" class="t-assignee-cb" value="${escapeHtml(s.name)}"> ${escapeHtml(s.name)}
+        </label>`).join('')}
+      </div>
+      <div class="hint" style="margin-top:6px;">Tick everyone responsible — each person gets their own copy to mark done, so you can see who has finished.</div>`
+    : `<input id="t-assignee-free" placeholder="Staff name">`;
   wrap.innerHTML = `
     <div class="field"><label>Task</label><input id="t-title" placeholder="e.g. Restock front desk supplies"></div>
+    <div class="field full"><label>Assigned to</label>${staffChecks}</div>
     <div class="form-grid">
-      <div class="field"><label>Assigned to</label>${staffOpts ? `<select id="t-assignee">${staffOpts}</select>` : `<input id="t-assignee" placeholder="Staff name">`}</div>
       <div class="field"><label>Start date</label><input id="t-date" type="date" value="${todayStr()}"></div>
       <div class="field"><label>Due date (target completion)</label><input id="t-due" type="date" value="${todayStr()}"></div>
     </div>
@@ -1196,19 +1204,34 @@ function renderNewTaskModal(modal){
   const b = document.createElement('button'); b.className='btn primary'; b.textContent='Add task';
   b.onclick = async ()=>{
     const title = document.getElementById('t-title').value.trim();
-    const assignee = document.getElementById('t-assignee').value.trim();
+    const freeEl = document.getElementById('t-assignee-free');
+    const assignees = freeEl
+      ? (freeEl.value.trim() ? [freeEl.value.trim()] : [])
+      : [...document.querySelectorAll('.t-assignee-cb')].filter(c=>c.checked).map(c=>c.value);
     const date = document.getElementById('t-date').value || todayStr();
     const dueDate = document.getElementById('t-due').value || date;
     const notes = document.getElementById('t-notes').value.trim();
     const errEl = document.getElementById('t-error');
-    if(!title || !assignee){ errEl.innerHTML = '<div class="notice err">Add a task description and who it is assigned to.</div>'; return; }
+    if(!title){ errEl.innerHTML = '<div class="notice err">Add a task description.</div>'; return; }
+    if(!assignees.length){ errEl.innerHTML = '<div class="notice err">Tick at least one person to assign this task to.</div>'; return; }
     if(dueDate < date){ errEl.innerHTML = '<div class="notice err">The due date cannot be before the start date.</div>'; return; }
-    b.disabled=true; b.textContent='Saving…';
-    try{
-      const {task} = await apiPost('/api/tasks', {title, assignee, date, dueDate, notes});
-      state.tasks.unshift(mapTask(task));
-      state.modal = null; render();
-    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add task'; }
+    b.disabled=true; b.textContent = assignees.length>1 ? `Saving ${assignees.length} tasks…` : 'Saving…';
+    const created = [];
+    const failed = [];
+    for(const assignee of assignees){
+      try{
+        const {task} = await apiPost('/api/tasks', {title, assignee, date, dueDate, notes});
+        created.push(mapTask(task));
+      }catch(e){ failed.push(assignee + ' (' + e.message + ')'); }
+    }
+    created.forEach(t=>state.tasks.unshift(t));
+    if(failed.length){
+      errEl.innerHTML = `<div class="notice err">Saved for ${created.length}, but failed for: ${escapeHtml(failed.join('; '))}</div>`;
+      b.disabled=false; b.textContent='Add task';
+      render();
+      return;
+    }
+    state.modal = null; render();
   };
   row.appendChild(b); modal.appendChild(row);
 }
