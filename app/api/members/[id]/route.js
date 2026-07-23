@@ -1,12 +1,12 @@
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { requireSession } from '../../../../lib/auth';
+import { requireSession, tierFor } from '../../../../lib/auth';
 import { withApi, ok } from '../../../../lib/api';
 
 const PLAN_MONTHS = { Monthly: 1, Quarterly: 3, Annual: 12, 'Class pack': 0 };
 
 export const POST = withApi(async (req, { params }) => {
   const session = requireSession();
-  if (session.role !== 'Admin') {
+  if (session.role !== 'Admin' && tierFor(session.role) !== 'SuperAdmin') {
     const err = new Error('Only Admin accounts renew memberships.');
     err.status = 403;
     throw err;
