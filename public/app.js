@@ -25,6 +25,7 @@ let state = {
   taskFilterAssignee: 'All',
   salesMonth: monthStr(new Date()),
   memberFilter: 'All',
+  trackerType: 'All',
   tasksTab: null,
   checklistDate: null,
   checklistStaff: null,
@@ -2495,7 +2496,9 @@ function exportRequestsToExcel(rows, sheetName, filePrefix){
 }
 
 function renderPoTracker(el){
-  const rows = activeRequests().filter(r=>r.type==='PO' || r.type==='PettyCash').sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  if(!state.trackerType) state.trackerType = 'All';
+  const allRows = activeRequests().filter(r=>r.type==='PO' || r.type==='PettyCash').sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  const rows = state.trackerType==='All' ? allRows : allRows.filter(r=>r.type===state.trackerType);
 
   const totalPOs = rows.length;
   const matched = rows.filter(r=>r.check && r.check.number && r.delivery && r.delivery.confirmedAt).length;
@@ -2517,16 +2520,35 @@ function renderPoTracker(el){
   el.appendChild(note);
 
   const trackerHead = document.createElement('div'); trackerHead.className='section-head';
-  trackerHead.innerHTML = '<h2>All requests</h2>';
+  const headTitle = state.trackerType==='PO' ? 'Purchase orders' : state.trackerType==='PettyCash' ? 'Petty cash' : 'All requests';
+  trackerHead.innerHTML = `<h2>${headTitle}</h2>`;
+  const tbar = document.createElement('div'); tbar.className='toolbar';
+  const poCount = allRows.filter(r=>r.type==='PO').length;
+  const pcCount = allRows.filter(r=>r.type==='PettyCash').length;
+  const typeSel = document.createElement('select');
+  typeSel.innerHTML = `
+    <option value="All" ${state.trackerType==='All'?'selected':''}>All requests (${allRows.length})</option>
+    <option value="PO" ${state.trackerType==='PO'?'selected':''}>Purchase orders only (${poCount})</option>
+    <option value="PettyCash" ${state.trackerType==='PettyCash'?'selected':''}>Petty cash only (${pcCount})</option>
+  `;
+  typeSel.onchange = ()=>{ state.trackerType = typeSel.value; render(); };
+  tbar.appendChild(typeSel);
   const exportBtn = document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
-  exportBtn.onclick = ()=>exportRequestsToExcel(rows, 'PO Tracker', 'roshan-po-tracker');
-  trackerHead.appendChild(exportBtn);
+  const exportName = state.trackerType==='PO' ? 'roshan-po-tracker-purchase-orders'
+    : state.trackerType==='PettyCash' ? 'roshan-po-tracker-petty-cash' : 'roshan-po-tracker';
+  exportBtn.onclick = ()=>exportRequestsToExcel(rows, 'PO Tracker', exportName);
+  tbar.appendChild(exportBtn);
+  trackerHead.appendChild(tbar);
   el.appendChild(trackerHead);
 
-  if(rows.length===0){ const e=document.createElement('div'); e.className='empty'; e.textContent='No requests yet.'; el.appendChild(e); return; }
+  if(rows.length===0){
+    const e=document.createElement('div'); e.className='empty';
+    e.textContent = state.trackerType==='All' ? 'No requests yet.' : 'No ' + (state.trackerType==='PO'?'purchase orders':'petty cash requests') + ' yet.';
+    el.appendChild(e); return;
+  }
 
   const table = document.createElement('table'); table.className='simple';
-  table.innerHTML = `<thead><tr><th>PO / ref #</th><th>Branch</th><th>Supplier / payee</th><th style="text-align:right">Check amount</th><th>Payment ref</th><th>Receipt filed</th><th>Variance</th><th>POS</th></tr></thead>`;
+  table.innerHTML = `<thead><tr><th>Ref #</th><th>Type</th><th>Branch</th><th>Supplier / payee</th><th style="text-align:right">Check amount</th><th>Payment ref</th><th>Receipt filed</th><th>Variance</th><th>POS</th></tr></thead>`;
   const tbody = document.createElement('tbody');
   rows.forEach(r=>{
     const tr = document.createElement('tr');
@@ -2541,8 +2563,12 @@ function renderPoTracker(el){
     if(r.delivery && r.delivery.varianceStatus==='Needs resolution') varianceCell = `<span class="badge flag">${fmtMoney(Math.abs(r.delivery.variance)).replace('PHP ','')} open</span>`;
     else if(r.delivery && r.delivery.varianceStatus==='Resolved') varianceCell = '<span class="badge ok">Resolved</span>';
     else if(r.delivery && r.delivery.varianceStatus==='Matched') varianceCell = '<span class="badge ok">Matched</span>';
+    const typeBadge = r.type==='PO'
+      ? '<span class="badge ok">Purchase order</span>'
+      : '<span class="badge neutral">Petty cash</span>';
     tr.innerHTML = `
       <td>${r.id}</td>
+      <td>${typeBadge}</td>
       <td>${escapeHtml(r.branch||'—')}</td>
       <td>${escapeHtml(r.supplier||r.payee)}</td>
       <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(checkAmt).replace('PHP ','')}</td>
@@ -2573,12 +2599,13 @@ function renderPoTracker(el){
       const dCard = document.createElement('div'); dCard.className='card';
       const dScroll = document.createElement('div'); dScroll.style.cssText='overflow-x:auto;';
       const dTable = document.createElement('table'); dTable.className='simple';
-      dTable.innerHTML = '<thead><tr><th>Reference #</th><th>Description</th><th>Supplier / payee</th><th style="text-align:right">Amount</th><th>Deleted by</th><th>Deleted on</th><th></th></tr></thead>';
+      dTable.innerHTML = '<thead><tr><th>Reference #</th><th>Type</th><th>Description</th><th>Supplier / payee</th><th style="text-align:right">Amount</th><th>Deleted by</th><th>Deleted on</th><th></th></tr></thead>';
       const dBody = document.createElement('tbody');
       deleted.forEach(r=>{
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${r.id}</td>
+          <td>${r.type==='PO' ? '<span class="badge ok">Purchase order</span>' : '<span class="badge neutral">Petty cash</span>'}</td>
           <td>${escapeHtml(r.title)}</td>
           <td>${escapeHtml(r.supplier||r.payee)}</td>
           <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(r.amount).replace('PHP ','')}</td>
