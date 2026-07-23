@@ -1133,7 +1133,6 @@ function renderAdhocTasks(el){
   list = [...list].sort((a,b)=> (a.status==='Done')-(b.status==='Done') || a.assignee.localeCompare(b.assignee));
 
   if(list.length===0){
-    el.innerHTML += '';
     const e = document.createElement('div'); e.className='empty'; e.textContent = 'No tasks logged for this filter yet.';
     el.appendChild(e);
     return;
