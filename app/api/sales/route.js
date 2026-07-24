@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../../../lib/supabase';
-import { requireSession } from '../../../lib/auth';
+import { requireSession, tierFor } from '../../../lib/auth';
 import { newSimpleId } from '../../../lib/ids';
 import { withApi, ok } from '../../../lib/api';
 
@@ -15,8 +15,8 @@ export const GET = withApi(async () => {
 
 export const POST = withApi(async (req) => {
   const session = requireSession();
-  if (session.role !== 'Admin') {
-    const err = new Error('Only Admin accounts log sales.');
+  if (session.role !== 'Admin' && tierFor(session.role) !== 'SuperAdmin') {
+    const err = new Error('Only Admin or Super Admin accounts log sales.');
     err.status = 403;
     throw err;
   }

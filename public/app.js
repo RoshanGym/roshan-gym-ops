@@ -27,6 +27,10 @@ let state = {
   memberFilter: 'All',
   trackerType: 'All',
   reqStatusFilter: null,
+  salesTab: 'overview',
+  salesBranch: 'All',
+  targets: [],
+  posPreview: null,
   trackerView: 'tracker',
   payFilter: 'All',
   tasksTab: null,
@@ -115,9 +119,13 @@ async function apiDelete(path){
   if(!res.ok) throw new Error(data.error || 'Something went wrong.');
   return data;
 }
-async function apiPatch(path, body){
-  const res = await fetch(path, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+async function apiPut(path, body){
+  const res = await fetch(path, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
   const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+  return data;
+}
+async function apiPatch(path, body){
   if(!res.ok) throw new Error(data.error || 'Something went wrong.');
   return data;
 }
@@ -148,7 +156,7 @@ function mapRequest(r){
   };
 }
 function mapTask(t){ return {id:t.id, title:t.title, assignee:t.assignee, date:t.date, dueDate:t.due_date||null, notes:t.notes, status:t.status, createdBy:t.created_by, createdAt:t.created_at, completedBy:t.completed_by, completedAt:t.completed_at}; }
-function mapSale(s){ return {id:s.id, date:s.date, category:s.category, description:s.description, amount:Number(s.amount||0), method:s.method, enteredBy:s.entered_by, createdAt:s.created_at}; }
+function mapSale(s){ return {id:s.id, date:s.date, category:s.category, description:s.description, amount:Number(s.amount||0), method:s.method, enteredBy:s.entered_by, createdAt:s.created_at, branch:s.branch||'', availment:s.availment||'', discipline:s.discipline||'', saleKind:s.sale_kind||'', item:s.item||'', qty:Number(s.qty||1), importBatch:s.import_batch||null, source:s.source||'manual'}; }
 function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null}; }
 function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
 
@@ -176,6 +184,9 @@ async function loadAll(){
     state.products = (data.products||[]).map(mapProduct);
     state.staff = data.staff||[];
     state.loaded = {requests:true, tasks:true, sales:true, members:true, staff:true, products:true};
+    // Sales targets power the actual-vs-target charts. Load separately so a
+    // missing table (before its migration runs) doesn't break the whole app.
+    try{ const t = await apiGet('/api/sales/targets'); state.targets = t.targets||[]; }catch(e){ state.targets = []; }
   }catch(e){
     // Could be an expired session — but could also be a real server error
     // (e.g. a pending database migration). Surface it on the login screen
@@ -1996,80 +2007,436 @@ function renderPosModal(modal){
 }
 
 // ============ SALES TRACKER ============
-const SALE_CATEGORIES = ['Membership','Day pass','Retail / merchandise','Personal training','Other'];
+const SALE_CATEGORIES = ['GYM','HIIT','MARTIAL ARTS','MEMBERSHIP','PERSONAL TRAINING','OTHERS'];
 const SALE_METHODS = ['Cash','Card','Bank transfer','GCash'];
 
-function renderSales(el){
-  const month = state.salesMonth;
-  const monthSales = state.sales.filter(s=>s.date.slice(0,7)===month);
-  const todaySales = state.sales.filter(s=>s.date===todayStr());
-  const monthTotal = monthSales.reduce((s,x)=>s+Number(x.amount||0),0);
-  const todayTotal = todaySales.reduce((s,x)=>s+Number(x.amount||0),0);
 
+const MARTIAL_DISCIPLINES = ['Boxing','Muay Thai','Taekwondo'];
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function salesBranchOf(s){ return s.branch || ''; }
+
+function renderSales(el){
+  if(!state.salesTab) state.salesTab = 'overview';
+  const isSuper = accessTier(curRole())==='SuperAdmin';
+
+  // Tab bar
+  const tabs = document.createElement('div'); tabs.className='toolbar'; tabs.style.marginBottom='18px';
+  const tabDefs = [
+    {k:'overview', l:'Overview'},
+    {k:'upload', l:'Upload POS report'},
+    {k:'entries', l:'Entries'},
+  ];
+  if(isSuper) tabDefs.push({k:'batches', l:'Manage imports'});
+  tabDefs.forEach(t=>{
+    const b = document.createElement('button');
+    b.className = 'btn' + (state.salesTab===t.k?' primary':'');
+    b.textContent = t.l;
+    b.onclick = ()=>{ state.salesTab = t.k; render(); };
+    tabs.appendChild(b);
+  });
+  el.appendChild(tabs);
+
+  const body = document.createElement('div');
+  el.appendChild(body);
+  try{
+    if(state.salesTab==='upload') return renderSalesUpload(body);
+    if(state.salesTab==='entries') return renderSalesEntries(body);
+    if(state.salesTab==='batches') return renderSalesBatches(body);
+    return renderSalesOverview(body);
+  }catch(err){
+    console.error('Sales view error:', err);
+    body.innerHTML = '<div class="empty">Could not load this view. Try another tab or refresh.</div>';
+  }
+}
+
+// ---------- OVERVIEW: metrics + charts + actual vs target ----------
+function renderSalesOverview(el){
+  const month = state.salesMonth;
+  const [yr, mo] = month.split('-').map(Number);
+  const branchFilter = state.salesBranch || 'All';
+
+  let monthSales = state.sales.filter(s=>s.date.slice(0,7)===month);
+  if(branchFilter!=='All') monthSales = monthSales.filter(s=>salesBranchOf(s)===branchFilter);
+
+  const monthTotal = monthSales.reduce((s,x)=>s+x.amount,0);
+  const todaySales = state.sales.filter(s=>s.date===todayStr() && (branchFilter==='All'||salesBranchOf(s)===branchFilter));
+  const todayTotal = todaySales.reduce((s,x)=>s+x.amount,0);
+
+  // target for this month + branch
+  const tgt = (state.targets||[]).find(t=>t.year===yr && t.month===mo && t.branch===(branchFilter==='All'?'All':branchFilter));
+  const minT = tgt? Number(tgt.min_target):0, medT = tgt? Number(tgt.medial_target):0, maxT = tgt? Number(tgt.max_target):0;
+  const pctToMin = minT? Math.round(monthTotal/minT*100):0;
+
+  // Filter bar
+  const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
+  bar.innerHTML = `<input type="month" id="ov-month" value="${month}">`;
+  const brSel = document.createElement('select');
+  brSel.innerHTML = ['All','Manila','Malabon'].map(b=>`<option value="${b}" ${branchFilter===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
+  brSel.onchange = ()=>{ state.salesBranch = brSel.value; render(); };
+  bar.appendChild(brSel);
+  el.appendChild(bar);
+  bar.querySelector('#ov-month').onchange = (e)=>{ state.salesMonth = e.target.value; render(); };
+
+  // Metrics
   const metrics = document.createElement('div'); metrics.className='metrics';
+  const overMin = monthTotal - minT;
   metrics.innerHTML = `
+    <div class="metric good"><div class="num">${fmtMoney(monthTotal).replace('PHP ','')}</div><div class="lbl">${MONTH_NAMES[mo-1]} ${yr} sales (PHP)</div></div>
     <div class="metric"><div class="num">${fmtMoney(todayTotal).replace('PHP ','')}</div><div class="lbl">Today (PHP)</div></div>
-    <div class="metric good"><div class="num">${fmtMoney(monthTotal).replace('PHP ','')}</div><div class="lbl">This month (PHP)</div></div>
-    <div class="metric"><div class="num">${monthSales.length}</div><div class="lbl">Entries this month</div></div>
-    <div class="metric"><div class="num">${monthSales.length? fmtMoney(monthTotal/monthSales.length).replace('PHP ',''):'0.00'}</div><div class="lbl">Avg per entry</div></div>
+    <div class="metric ${minT&&monthTotal>=minT?'good':'flag'}"><div class="num">${pctToMin}%</div><div class="lbl">of minimum target</div></div>
+    <div class="metric ${overMin>=0?'good':'flag'}"><div class="num">${fmtMoney(Math.abs(overMin)).replace('PHP ','')}</div><div class="lbl">${overMin>=0?'over':'under'} minimum</div></div>
   `;
   el.appendChild(metrics);
 
-  const byCat = {};
-  SALE_CATEGORIES.forEach(c=>byCat[c]=0);
-  monthSales.forEach(s=>{ byCat[s.category] = (byCat[s.category]||0) + Number(s.amount||0); });
-  const maxCat = Math.max(1, ...Object.values(byCat));
+  if(!state.sales.length){
+    const e=document.createElement('div'); e.className='empty'; e.textContent='No sales yet. Upload a POS report to get started.'; el.appendChild(e); return;
+  }
+
+  // Actual vs Target gauge
+  if(tgt){
+    const gaugeCard = document.createElement('div'); gaugeCard.className='card';
+    gaugeCard.innerHTML = `<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:14px;">Actual vs Target — ${MONTH_NAMES[mo-1]} ${yr}${branchFilter!=='All'?(' · '+branchFilter):''}</h2>`;
+    const gauge = document.createElement('div');
+    const cap = maxT||1;
+    const seg = (val,color,label)=>{
+      const pct = Math.min(100, val/cap*100);
+      return `<div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);margin-bottom:3px;"><span>${label}</span><span>${fmtMoney(val).replace('PHP ','')}</span></div>
+        <div class="bt" style="height:10px;position:relative;"><div class="bf" style="width:${pct}%;background:${color};"></div></div></div>`;
+    };
+    gauge.innerHTML =
+      seg(monthTotal, monthTotal>=minT?'var(--lime)':'var(--amber)', 'Actual') +
+      seg(minT, 'rgba(255,255,255,.25)', 'Minimum target') +
+      seg(medT, 'rgba(255,255,255,.25)', 'Medial target') +
+      seg(maxT, 'rgba(255,255,255,.25)', 'Max target');
+    gaugeCard.appendChild(gauge);
+    el.appendChild(gaugeCard);
+  }
+
+  // Chart: monthly trend (actual vs targets across the year)
+  const trendCard = document.createElement('div'); trendCard.className='card';
+  trendCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Monthly actual vs target</h2>';
+  const c1 = document.createElement('canvas'); c1.style.maxHeight='260px'; trendCard.appendChild(c1);
+  el.appendChild(trendCard);
+
+  // Chart: by category (doughnut)
   const catCard = document.createElement('div'); catCard.className='card';
-  catCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">By category, this month</h2>';
-  SALE_CATEGORIES.forEach(c=>{
-    const row = document.createElement('div'); row.className='bar-row';
-    row.innerHTML = `<div class="bl">${c}</div><div class="bt"><div class="bf" style="width:${(byCat[c]/maxCat*100).toFixed(0)}%"></div></div><div class="bv">${fmtMoney(byCat[c]).replace('PHP ','')}</div>`;
-    catCard.appendChild(row);
-  });
+  catCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Sales by category</h2>';
+  const c2 = document.createElement('canvas'); c2.style.maxHeight='260px'; catCard.appendChild(c2);
   el.appendChild(catCard);
 
+  // Chart: per admin
+  const adminCard = document.createElement('div'); adminCard.className='card';
+  adminCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Sales per admin</h2>';
+  const c3 = document.createElement('canvas'); c3.style.maxHeight='260px'; adminCard.appendChild(c3);
+  el.appendChild(adminCard);
+
+  // Martial arts discipline breakdown (if any)
+  const maSales = monthSales.filter(s=>s.category==='MARTIAL ARTS');
+  if(maSales.length){
+    const maCard = document.createElement('div'); maCard.className='card';
+    maCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Martial arts by discipline</h2>';
+    const c4 = document.createElement('canvas'); c4.style.maxHeight='220px'; maCard.appendChild(c4);
+    el.appendChild(maCard);
+    setTimeout(()=>drawDisciplineChart(c4, maSales), 30);
+  }
+
+  // Draw charts after they're in the DOM
+  setTimeout(()=>{
+    drawTrendChart(c1, yr, branchFilter);
+    drawCategoryChart(c2, monthSales);
+    drawAdminChart(c3, monthSales);
+  }, 30);
+}
+
+function chartColors(n){
+  const base = ['#e5231b','#f0a020','#3fb950','#58a6ff','#bc8cff','#f778ba','#56d4dd','#e3b341','#7ee787','#ff9bce'];
+  const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
+}
+
+function drawTrendChart(canvas, year, branch){
+  if(typeof Chart==='undefined') return;
+  const actual = new Array(12).fill(0);
+  state.sales.filter(s=>Number(s.date.slice(0,4))===year && (branch==='All'||salesBranchOf(s)===branch))
+    .forEach(s=>{ const m=Number(s.date.slice(5,7))-1; actual[m]+=s.amount; });
+  const tb = branch==='All'?'All':branch;
+  const minA=new Array(12).fill(0), medA=new Array(12).fill(0), maxA=new Array(12).fill(0);
+  (state.targets||[]).filter(t=>t.year===year && t.branch===tb).forEach(t=>{
+    minA[t.month-1]=Number(t.min_target); medA[t.month-1]=Number(t.medial_target); maxA[t.month-1]=Number(t.max_target);
+  });
+  if(canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas, {
+    type:'bar',
+    data:{ labels:MONTH_NAMES, datasets:[
+      {type:'bar', label:'Actual', data:actual, backgroundColor:actual.map((v,i)=> v>=minA[i]&&minA[i]>0 ? '#3fb950':'#e5231b'), borderRadius:4, order:2},
+      {type:'line', label:'Min target', data:minA, borderColor:'#f0a020', borderWidth:2, pointRadius:0, tension:.2, order:1},
+      {type:'line', label:'Medial', data:medA, borderColor:'#58a6ff', borderWidth:1.5, borderDash:[5,4], pointRadius:0, tension:.2, order:1},
+      {type:'line', label:'Max', data:maxA, borderColor:'#bc8cff', borderWidth:1.5, borderDash:[2,3], pointRadius:0, tension:.2, order:1},
+    ]},
+    options:chartOpts()
+  });
+}
+
+function drawCategoryChart(canvas, sales){
+  if(typeof Chart==='undefined') return;
+  const by={}; sales.forEach(s=>by[s.category]=(by[s.category]||0)+s.amount);
+  const labels=Object.keys(by), data=labels.map(l=>by[l]);
+  if(canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas, {
+    type:'doughnut',
+    data:{ labels, datasets:[{data, backgroundColor:chartColors(labels.length), borderColor:'#0d0d0f', borderWidth:2}]},
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#c9d1d9', font:{size:11}}}} }
+  });
+}
+
+function drawAdminChart(canvas, sales){
+  if(typeof Chart==='undefined') return;
+  const by={}; sales.forEach(s=>{ const a=s.enteredBy||'Unknown'; by[a]=(by[a]||0)+s.amount; });
+  const entries=Object.entries(by).sort((a,b)=>b[1]-a[1]);
+  const labels=entries.map(e=>e[0]), data=entries.map(e=>e[1]);
+  if(canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas, {
+    type:'bar',
+    data:{ labels, datasets:[{label:'Sales (PHP)', data, backgroundColor:chartColors(labels.length), borderRadius:4}]},
+    options:{...chartOpts(), indexAxis:'y'}
+  });
+}
+
+function drawDisciplineChart(canvas, maSales){
+  if(typeof Chart==='undefined') return;
+  const by={}; maSales.forEach(s=>{ const d=s.discipline||'Other'; by[d]=(by[d]||0)+s.amount; });
+  const labels=Object.keys(by), data=labels.map(l=>by[l]);
+  if(canvas._chart) canvas._chart.destroy();
+  canvas._chart = new Chart(canvas, {
+    type:'polarArea',
+    data:{ labels, datasets:[{data, backgroundColor:chartColors(labels.length).map(c=>c+'cc')}]},
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#c9d1d9', font:{size:11}}}}, scales:{r:{ticks:{display:false}, grid:{color:'rgba(255,255,255,.08)'}}} }
+  });
+}
+
+function chartOpts(){
+  return {
+    responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#c9d1d9', font:{size:11}}}},
+    scales:{
+      x:{ticks:{color:'#8b949e', font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'}},
+      y:{ticks:{color:'#8b949e', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'}}
+    }
+  };
+}
+
+// ---------- UPLOAD POS REPORT ----------
+function renderSalesUpload(el){
+  const intro = document.createElement('div'); intro.className='notice';
+  intro.innerHTML = 'Upload the POS <strong>“Sales Summary by Category”</strong> CSV export after your shift. The system reads the date, staff, and each line, maps them to your tracker categories, and skips merchandise/drinks. You review before anything is saved.';
+  el.appendChild(intro);
+
+  const card = document.createElement('div'); card.className='card';
+  card.innerHTML = `
+    <div class="field full"><label>POS report (CSV)</label><input id="pos-file" type="file" accept=".csv,text/csv"></div>
+    <div id="pos-status" class="hint" style="margin-top:8px;"></div>
+  `;
+  el.appendChild(card);
+  const resultHost = document.createElement('div');
+  el.appendChild(resultHost);
+
+  const status = card.querySelector('#pos-status');
+  card.querySelector('#pos-file').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    status.textContent = 'Reading the report…';
+    resultHost.innerHTML = '';
+    try{
+      const fd = new FormData(); fd.append('file', file);
+      const res = await fetch('/api/sales/import', {method:'POST', body:fd});
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data.error || 'Could not read the file.');
+      status.textContent = '';
+      state.posPreview = data.preview;
+      renderPosPreview(resultHost, data.preview);
+    }catch(err){ status.innerHTML = `<span style="color:var(--red-ink)">${escapeHtml(err.message)}</span>`; }
+  };
+}
+
+function renderPosPreview(host, preview){
+  host.innerHTML = '';
+
+  // Warnings
+  if(preview.warnings && preview.warnings.length){
+    const w = document.createElement('div'); w.className='notice err';
+    w.innerHTML = '<strong>Please review before importing:</strong><ul style="margin:6px 0 0 18px;padding:0;">' +
+      preview.warnings.map(x=>`<li>${escapeHtml(x)}</li>`).join('') + '</ul>';
+    host.appendChild(w);
+  }
+
+  // Header summary — editable staff/branch/date
+  const head = document.createElement('div'); head.className='card';
+  head.innerHTML = `
+    <h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Import summary</h2>
+    <div class="form-grid">
+      <div class="field"><label>Date</label><input id="imp-date" type="date" value="${preview.date||todayStr()}"></div>
+      <div class="field"><label>Staff (admin)</label><input id="imp-staff" value="${escapeHtml(preview.staff||'')}"></div>
+      <div class="field"><label>Branch</label><select id="imp-branch">
+        <option value="Manila" ${preview.branch==='Manila'?'selected':''}>Manila</option>
+        <option value="Malabon" ${preview.branch==='Malabon'?'selected':''}>Malabon</option>
+      </select></div>
+    </div>
+    <div class="hint" style="margin-top:6px;">Sales to import: <strong>${fmtMoney(preview.keptSum)}</strong> · excluded merchandise/drinks: ${fmtMoney(preview.excludedSum)} · POS grand total: ${preview.grandTotal!=null?fmtMoney(preview.grandTotal):'—'}</div>
+  `;
+  host.appendChild(head);
+
+  // Line items with New/Renew where needed
+  const tableCard = document.createElement('div'); tableCard.className='card';
+  const table = document.createElement('table'); table.className='simple'; table.style.minWidth='680px';
+  table.innerHTML = '<thead><tr><th>Item (POS)</th><th>Availment</th><th>Category</th><th>Qty</th><th style="text-align:right">Amount</th><th>New/Renew</th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  preview.lines.forEach((L,i)=>{
+    const tr = document.createElement('tr');
+    const catCell = L.unmapped
+      ? `<span class="badge flag">${escapeHtml(L.category)}?</span>`
+      : `${escapeHtml(L.category)}${L.discipline?` <span class="hint">(${escapeHtml(L.discipline)})</span>`:''}`;
+    tr.innerHTML = `
+      <td>${escapeHtml(L.item)}</td>
+      <td>${escapeHtml(L.availment)}</td>
+      <td>${catCell}</td>
+      <td>${L.qty}</td>
+      <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(L.amount).replace('PHP ','')}</td>
+      <td></td>`;
+    if(L.needsKind){
+      const sel = document.createElement('select'); sel.dataset.idx=i;
+      sel.innerHTML = '<option value="New">New</option><option value="Renew">Renew</option>';
+      sel.value = L.saleKind || 'New';
+      sel.className = 'pos-kind';
+      tr.lastElementChild.appendChild(sel);
+    } else {
+      tr.lastElementChild.innerHTML = '<span class="hint">—</span>';
+    }
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  const scroll = document.createElement('div'); scroll.style.overflowX='auto'; scroll.appendChild(table);
+  tableCard.appendChild(scroll);
+  host.appendChild(tableCard);
+
+  // Commit
+  const row = document.createElement('div'); row.className='action-row';
+  const importBtn = document.createElement('button'); importBtn.className='btn primary'; importBtn.textContent='Import these sales';
+  importBtn.onclick = async ()=>{
+    const date = document.getElementById('imp-date').value;
+    const staff = document.getElementById('imp-staff').value.trim();
+    const branch = document.getElementById('imp-branch').value;
+    if(!staff){ alert('Enter the staff name.'); return; }
+    // gather New/Renew choices
+    host.querySelectorAll('.pos-kind').forEach(sel=>{ preview.lines[Number(sel.dataset.idx)].saleKind = sel.value; });
+    importBtn.disabled=true; importBtn.textContent='Importing…';
+    try{
+      const res = await apiPut('/api/sales/import', {date, staff, branch, lines:preview.lines});
+      // reload sales
+      const fresh = await apiGet('/api/sales');
+      state.sales = (fresh.sales||[]).map(mapSale);
+      state.posPreview = null;
+      state.salesTab = 'overview';
+      alert('Imported ' + res.imported + ' sales lines totalling ' + fmtMoney(res.total) + '.');
+      render();
+    }catch(e){ alert(e.message); importBtn.disabled=false; importBtn.textContent='Import these sales'; }
+  };
+  row.appendChild(importBtn);
+  const cancel = document.createElement('button'); cancel.className='btn ghost'; cancel.textContent='Cancel';
+  cancel.onclick = ()=>{ state.posPreview=null; render(); };
+  row.appendChild(cancel);
+  host.appendChild(row);
+}
+
+// ---------- ENTRIES ----------
+function renderSalesEntries(el){
+  const month = state.salesMonth;
+  let monthSales = state.sales.filter(s=>s.date.slice(0,7)===month);
+  const branchFilter = state.salesBranch || 'All';
+  if(branchFilter!=='All') monthSales = monthSales.filter(s=>salesBranchOf(s)===branchFilter);
+
   const head = document.createElement('div'); head.className='section-head';
-  head.innerHTML = '<h2>Entries</h2>';
+  head.innerHTML = '<h2>Entries — ' + month + '</h2>';
   const toolbar = document.createElement('div'); toolbar.className='toolbar';
   toolbar.innerHTML = `<input type="month" id="sales-month" value="${month}">`;
-  head.appendChild(toolbar);
-  const salesExBtn=document.createElement('button'); salesExBtn.className='btn'; salesExBtn.textContent='Export to Excel';
-  salesExBtn.onclick=()=>{
+  const brSel = document.createElement('select');
+  brSel.innerHTML = ['All','Manila','Malabon'].map(b=>`<option value="${b}" ${branchFilter===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
+  brSel.onchange = ()=>{ state.salesBranch = brSel.value; render(); };
+  toolbar.appendChild(brSel);
+  const exBtn=document.createElement('button'); exBtn.className='btn'; exBtn.textContent='Export to Excel';
+  exBtn.onclick=()=>{
     const rows = monthSales.map(s=>({
-      'Entry #': s.id,
-      'Date': s.date,
-      'Category': s.category,
-      'Description': s.description||'',
-      'Amount (PHP)': s.amount,
-      'Payment method': s.method||'',
-      'Entered by': s.enteredBy||'',
+      'Date':s.date,'Branch':s.branch||'','Category':s.category,'Discipline':s.discipline||'',
+      'Item':s.item||s.description||'','Availment':s.availment||'','New/Renew':s.saleKind||'',
+      'Qty':s.qty||1,'Amount (PHP)':s.amount,'Method':s.method||'','Admin':s.enteredBy||'','Source':s.source||'',
     }));
-    exportRowsToExcel(rows, 'Sales ' + month, 'roshan-sales-' + month);
+    exportRowsToExcel(rows, 'Sales '+month, 'roshan-sales-'+month);
   };
-  toolbar.appendChild(salesExBtn);
-  if(curRole()==='Admin'){
+  toolbar.appendChild(exBtn);
+  if(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin'){
     const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ Log sale';
     b.onclick=()=>{ state.modal={type:'newSale'}; render(); };
     toolbar.appendChild(b);
   }
+  head.appendChild(toolbar);
   el.appendChild(head);
-  toolbar.querySelector('#sales-month').onchange = (e)=>{ state.salesMonth = e.target.value; renderContent(); };
+  toolbar.querySelector('#sales-month').onchange = (e)=>{ state.salesMonth = e.target.value; render(); };
 
   if(monthSales.length===0){
-    const e=document.createElement('div'); e.className='empty'; e.textContent='No sales logged for this month yet.'; el.appendChild(e); return;
+    const e=document.createElement('div'); e.className='empty'; e.textContent='No sales for this month yet.'; el.appendChild(e); return;
   }
-  const table = document.createElement('table'); table.className='simple';
-  table.innerHTML = `<thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Method</th><th>Entered by</th><th style="text-align:right">Amount</th></tr></thead>`;
+  const table = document.createElement('table'); table.className='simple'; table.style.minWidth='820px';
+  table.innerHTML = `<thead><tr><th>Date</th><th>Branch</th><th>Category</th><th>Item</th><th>Availment</th><th>Kind</th><th>Admin</th><th style="text-align:right">Amount</th></tr></thead>`;
   const tbody = document.createElement('tbody');
   [...monthSales].sort((a,b)=>b.date.localeCompare(a.date)).forEach(s=>{
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${fmtDate(s.date)}</td><td>${escapeHtml(s.category)}</td><td>${escapeHtml(s.description||'—')}</td><td>${escapeHtml(s.method)}</td><td>${escapeHtml(s.enteredBy)}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(s.amount)}</td>`;
+    tr.innerHTML = `<td>${fmtDate(s.date)}</td><td>${escapeHtml(s.branch||'—')}</td><td>${escapeHtml(s.category)}${s.discipline?` <span class="hint">(${escapeHtml(s.discipline)})</span>`:''}</td><td>${escapeHtml(s.item||s.description||'—')}</td><td>${escapeHtml(s.availment||'—')}</td><td>${s.saleKind?`<span class="badge ${s.saleKind==='New'?'ok':'neutral'}">${s.saleKind}</span>`:'—'}</td><td>${escapeHtml(s.enteredBy||'—')}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(s.amount)}</td>`;
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
-  const tableCard = document.createElement('div'); tableCard.className='card';
-  tableCard.appendChild(table);
+  const scroll=document.createElement('div'); scroll.style.overflowX='auto'; scroll.appendChild(table);
+  const tableCard = document.createElement('div'); tableCard.className='card'; tableCard.appendChild(scroll);
   el.appendChild(tableCard);
+}
+
+// ---------- MANAGE IMPORTS (batch cleanup) ----------
+async function renderSalesBatches(el){
+  const intro = document.createElement('div'); intro.className='notice';
+  intro.textContent = 'Every POS upload is a batch. Remove a batch to delete all its sales at once — useful for clearing sample or test data.';
+  el.appendChild(intro);
+
+  const host = document.createElement('div');
+  host.innerHTML = '<div class="hint">Loading imports…</div>';
+  el.appendChild(host);
+
+  try{
+    const {batches} = await apiGet('/api/sales/batches');
+    host.innerHTML = '';
+    if(!batches.length){ host.innerHTML = '<div class="empty">No POS imports yet.</div>'; return; }
+    const table = document.createElement('table'); table.className='simple';
+    table.innerHTML = '<thead><tr><th>Date</th><th>Staff</th><th>Branch</th><th>Lines</th><th style="text-align:right">Total</th><th></th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    batches.forEach(b=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${fmtDate(b.date)}</td><td>${escapeHtml(b.staff||'—')}</td><td>${escapeHtml(b.branch||'—')}</td><td>${b.count}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(b.total)}</td>`;
+      const td = document.createElement('td');
+      const del = document.createElement('button'); del.className='btn sm ghost'; del.textContent='Remove';
+      del.onclick = async ()=>{
+        if(!confirm(`Remove this import?\n\n${b.staff} · ${b.date} · ${b.count} lines · ${fmtMoney(b.total)}\n\nThis deletes those sales permanently.`)) return;
+        try{
+          await apiDelete('/api/sales/import?batch=' + encodeURIComponent(b.batch));
+          const fresh = await apiGet('/api/sales');
+          state.sales = (fresh.sales||[]).map(mapSale);
+          render();
+        }catch(e){ alert(e.message); }
+      };
+      td.appendChild(del); tr.appendChild(td);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    const card = document.createElement('div'); card.className='card'; card.appendChild(table);
+    host.appendChild(card);
+  }catch(e){ host.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; }
 }
 
 function renderNewSaleModal(modal){
