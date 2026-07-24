@@ -153,6 +153,22 @@ export const POST = withApi(async (req, { params }) => {
     update.delivery = { ...r.delivery, varianceStatus: 'Resolved', resolution, resolutionNotes: notes, resolvedBy: session.name, resolvedAt: nowIso() };
     log('Payment variance resolved: ' + resolution + (notes ? ' — ' + notes : ''));
 
+  } else if (action === 'reconcile') {
+    // Tick a payment off against the bank statement.
+    requireRole(session, ['Owner', 'Supervisor']);
+    if (!r.check_info || !r.check_info.number) badRequest('No payment has been recorded on this request yet.');
+    if (r.reconciled_at) badRequest('This payment is already marked as reconciled.');
+    update.reconciled_at = nowIso();
+    update.reconciled_by = session.name;
+    log(`Payment #${r.check_info.number} reconciled against the bank statement`);
+
+  } else if (action === 'unreconcile') {
+    requireRole(session, ['Owner', 'Supervisor']);
+    if (!r.reconciled_at) badRequest('This payment is not marked as reconciled.');
+    update.reconciled_at = null;
+    update.reconciled_by = null;
+    log('Bank reconciliation removed');
+
   } else {
     badRequest('Unknown action.');
   }

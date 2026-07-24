@@ -38,26 +38,36 @@ export const POST = withApi(async (req) => {
     ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
     : { type: 'image', source: { type: 'base64', media_type: file.type || 'image/jpeg', data: b64 } };
 
-  const prompt = `This is a scanned Roshan Gym membership agreement form, filled in by hand.
+  const prompt = `This is a scanned Roshan Gym membership agreement, filled in by hand.
 Extract the member's details and respond with ONLY a JSON object (no markdown fences, no commentary) with these keys:
 {
   "firstName": string or null,
   "lastName": string or null,
-  "contactNumber": string or null,
+  "contactNumber": string or null (digits only, e.g. "09616806560"),
   "email": string or null,
   "address": string or null,
-  "startDate": "YYYY-MM-DD" or null (from the Start Date box, if legible),
-  "branch": "Manila" or "Malabon" or null (printed under the logo),
+  "startDate": "YYYY-MM-DD" or null (the "Start Date" box, top right),
+  "endDate": "YYYY-MM-DD" or null (the "End Date" box, top right),
+  "branch": "Manila" or "Malabon" or null (printed under the logo, e.g. "Malabon Branch"),
   "source": one of "Facebook", "Online Inquiries", "Walk-in", "Referral", "Other" or null
-           (from the "Where did you learn about us?" checkboxes:
+           (from the ticked box under "Where did you learn about us?":
             Facebook/Instagram/TikTok -> "Facebook";
             Google / Online Search -> "Online Inquiries";
-            Walk in -> "Walk-in";
+            Walk in / I just saw the location -> "Walk-in";
             Recommended by a friend/relative -> "Referral";
             Event / Community Activity or OTHERS -> "Other"),
-  "gender": "M" or "F" or null
+  "gender": "M" or "F" or null (often circled),
+  "tshirtSize": "Small" | "Medium" | "Large" | "XL" | "XXL" or null,
+  "staffRep": string or null (the "Roshan Gym Representative" signature name)
 }
-Read handwriting carefully. If a value is illegible or blank, use null — do not guess.`;
+
+Important notes about these forms:
+- The T-shirt size is often written free-hand ANYWHERE on the page, commonly
+  across the top, in notes like "LARGE SIZED CLAIMED" or "MEDIUM - claimed".
+  Map that to the closest size value.
+- Names are in separate "Last Name" and "First Name" rows.
+- If the scan has several pages, the details are on the Membership Agreement page.
+Read the handwriting carefully. If a value is illegible or blank, use null - never guess.`;
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

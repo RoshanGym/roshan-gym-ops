@@ -26,6 +26,9 @@ let state = {
   salesMonth: monthStr(new Date()),
   memberFilter: 'All',
   trackerType: 'All',
+  reqStatusFilter: null,
+  trackerView: 'tracker',
+  payFilter: 'All',
   tasksTab: null,
   checklistDate: null,
   checklistStaff: null,
@@ -140,6 +143,7 @@ function mapRequest(r){
     approval:r.approval||{}, check:r.check_info||{}, receipt:r.receipt||{}, handover:r.handover||{},
     delivery:r.delivery||{}, pos:r.pos||{}, history:r.history||[],
     deletedAt:r.deleted_at||null, deletedBy:r.deleted_by||null,
+    reconciledAt:r.reconciled_at||null, reconciledBy:r.reconciled_by||null,
     attachments:(r.attachments||[]).map(a=>({id:a.id, name:a.name, mime:a.mime, label:a.label, uploadedBy:a.uploaded_by, uploadedAt:a.uploaded_at})),
   };
 }
@@ -1337,10 +1341,28 @@ function renderRequestsSection(el, type){
     priceBtn.onclick = ()=>{ state.modal = {type:'pricelist'}; render(); };
     btnGroup.appendChild(priceBtn);
   }
+  // Status filter — labels follow the request type (a check for a PO is a
+  // cash release for petty cash), but both map to the same stage keys.
+  if(!state.reqStatusFilter) state.reqStatusFilter = {PO:'All', PettyCash:'All'};
+  const statusFilter = state.reqStatusFilter[type] || 'All';
+  const allOfType = activeRequests().filter(r=>r.type===type);
+  const countFor = (key)=> allOfType.filter(r=>r.status===key).length;
+  const statusSel = document.createElement('select');
+  statusSel.innerHTML = [
+    `<option value="All" ${statusFilter==='All'?'selected':''}>All statuses (${allOfType.length})</option>`,
+    ...STAGES.map((s,i)=>`<option value="${s.key}" ${statusFilter===s.key?'selected':''}>${stageShort(type,i)} (${countFor(s.key)})</option>`),
+    `<option value="Rejected" ${statusFilter==='Rejected'?'selected':''}>Rejected (${countFor('Rejected')})</option>`,
+  ].join('');
+  statusSel.onchange = ()=>{ state.reqStatusFilter[type] = statusSel.value; render(); };
+  btnGroup.appendChild(statusSel);
+
   const exportBtn = document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
   exportBtn.onclick = ()=>{
-    const list = activeRequests().filter(r=>r.type===type).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
-    exportRequestsToExcel(list, type==='PO'?'Purchase Orders':'Petty Cash', type==='PO'?'roshan-purchase-orders':'roshan-petty-cash');
+    const list = allOfType
+      .filter(r=>statusFilter==='All' || r.status===statusFilter)
+      .sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+    const suffix = statusFilter==='All' ? '' : '-' + statusFilter.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+    exportRequestsToExcel(list, type==='PO'?'Purchase Orders':'Petty Cash', (type==='PO'?'roshan-purchase-orders':'roshan-petty-cash') + suffix);
   };
   btnGroup.appendChild(exportBtn);
   if(curRole()==='Admin'){
@@ -1352,10 +1374,18 @@ function renderRequestsSection(el, type){
   head.appendChild(btnGroup);
   el.appendChild(head);
 
-  const list = activeRequests().filter(r=>r.type===type).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  const list = allOfType
+    .filter(r=>statusFilter==='All' || r.status===statusFilter)
+    .sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
   if(list.length===0){
     const e = document.createElement('div'); e.className='empty';
-    e.textContent = type==='PO' ? 'No purchase orders yet.' : 'No reimbursement requests yet.';
+    if(statusFilter!=='All'){
+      const idx = STAGES.findIndex(s=>s.key===statusFilter);
+      const label = statusFilter==='Rejected' ? 'rejected' : stageShort(type, idx).toLowerCase();
+      e.textContent = 'No ' + (type==='PO'?'purchase orders':'reimbursement requests') + ' at "' + label + '" right now.';
+    } else {
+      e.textContent = type==='PO' ? 'No purchase orders yet.' : 'No reimbursement requests yet.';
+    }
     el.appendChild(e); return;
   }
   list.forEach(r=>el.appendChild(renderReqCard(r)));
@@ -2325,9 +2355,16 @@ function renderNewMemberModal(modal){
     const contactV = [f.contactNumber, f.email].filter(Boolean).join(' / ');
     filled += setVal('m-contact', contactV || null);
     filled += setVal('m-start', f.startDate || null);
-    if(f.branch === 'Manila' || f.branch === 'Malabon'){ document.getElementById('m-branch').value = f.branch; filled++; }
-    if(f.source){ const sel = document.getElementById('m-source'); if([...sel.options].some(o=>o.value===f.source)){ sel.value = f.source; filled++; } }
-    if(f.address){ const rEl = document.getElementById('m-remarks'); if(rEl && !rEl.value) rEl.value = 'Address: ' + f.address; }
+    if(f.branch === 'Manila' || f.branch === 'Malabon'){ document.getElementById('m-branch').value = f.branch; document.getElementById('m-branch').classList.add('ai-filled'); filled++; }
+    if(f.source){ const sel = document.getElementById('m-source'); if([...sel.options].some(o=>o.value===f.source)){ sel.value = f.source; sel.classList.add('ai-filled'); filled++; } }
+    if(f.tshirtSize){ const ts = document.getElementById('m-tshirt'); if([...ts.options].some(o=>o.value===f.tshirtSize)){ ts.value = f.tshirtSize; ts.classList.add('ai-filled'); filled++; } }
+    // Address and gender aren't dedicated fields — keep them in remarks so the
+    // detail from the form isn't lost.
+    const extras = [];
+    if(f.address) extras.push('Address: ' + f.address);
+    if(f.gender) extras.push('Gender: ' + f.gender);
+    if(f.staffRep) extras.push('Processed by: ' + f.staffRep);
+    if(extras.length){ const rEl = document.getElementById('m-remarks'); if(rEl && !rEl.value) { rEl.value = extras.join(' · '); rEl.classList.add('ai-filled'); } }
     return filled;
   };
 
@@ -2529,6 +2566,8 @@ function requestToExportRow(r){
     'Payment method': r.paymentMethod || '',
     'Check / payment ref': (r.check && r.check.number) || '',
     'Payment date': (r.check && r.check.date) || '',
+    'Delivery date': (r.delivery && r.delivery.confirmedAt) ? r.delivery.confirmedAt.slice(0,10) : '',
+    'Reconciled': r.reconciledAt ? 'Yes' : '',
     'Check amount (PHP)': (r.check && r.check.number) ? checkAmt : '',
     'Delivery amount (PHP)': (r.delivery && r.delivery.deliveredAmount!=null) ? Number(r.delivery.deliveredAmount) : '',
     'Variance (PHP)': (r.delivery && r.delivery.variance) ? Number(r.delivery.variance) : '',
@@ -2563,8 +2602,169 @@ function exportRequestsToExcel(rows, sheetName, filePrefix){
   XLSX.writeFile(wb, `${filePrefix}-${today}.xlsx`);
 }
 
+// ---- Payment schedule: every recorded payment, grouped by week, with bank
+// reconciliation ticks so the week's outgoings can be matched to the statement.
+function mondayOf(dateStr){
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const day = d.getUTCDay();
+  d.setUTCDate(d.getUTCDate() - (day===0 ? 6 : day-1));
+  return d.toISOString().slice(0,10);
+}
+
+function renderPaymentSchedule(el){
+  const isSuper = accessTier(curRole())==='SuperAdmin';
+  if(!state.payFilter) state.payFilter = 'All';
+
+  // Only requests with a recorded payment belong on a payment schedule.
+  const paid = activeRequests()
+    .filter(r=>r.check && r.check.number && r.check.date)
+    .filter(r=>state.trackerType==='All' || r.type===state.trackerType)
+    .sort((a,b)=> (b.check.date||'').localeCompare(a.check.date||''));
+
+  const shown = state.payFilter==='All' ? paid
+    : state.payFilter==='Unreconciled' ? paid.filter(r=>!r.reconciledAt)
+    : paid.filter(r=>r.reconciledAt);
+
+  const totalOut = paid.reduce((s,r)=>s+Number((r.check&&r.check.amount)||r.amount||0),0);
+  const unrec = paid.filter(r=>!r.reconciledAt);
+  const unrecTotal = unrec.reduce((s,r)=>s+Number((r.check&&r.check.amount)||r.amount||0),0);
+  const thisWeek = mondayOf(todayStr());
+  const weekPayments = paid.filter(r=>mondayOf(r.check.date)===thisWeek);
+  const weekTotal = weekPayments.reduce((s,r)=>s+Number((r.check&&r.check.amount)||r.amount||0),0);
+
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric"><div class="num">${fmtMoney(weekTotal).replace('PHP ','')}</div><div class="lbl">This week's payments (${weekPayments.length})</div></div>
+    <div class="metric ${unrec.length?'flag':'good'}"><div class="num">${unrec.length}</div><div class="lbl">Not yet reconciled</div></div>
+    <div class="metric ${unrecTotal?'flag':''}"><div class="num">${fmtMoney(unrecTotal).replace('PHP ','')}</div><div class="lbl">Unreconciled value (PHP)</div></div>
+    <div class="metric"><div class="num">${fmtMoney(totalOut).replace('PHP ','')}</div><div class="lbl">Total recorded payments</div></div>
+  `;
+  el.appendChild(metrics);
+
+  const head = document.createElement('div'); head.className='section-head';
+  head.innerHTML = '<h2>Payment schedule</h2>';
+  const bar = document.createElement('div'); bar.className='toolbar';
+  const typeSel = document.createElement('select');
+  typeSel.innerHTML = `
+    <option value="All" ${state.trackerType==='All'?'selected':''}>All types</option>
+    <option value="PO" ${state.trackerType==='PO'?'selected':''}>Purchase orders</option>
+    <option value="PettyCash" ${state.trackerType==='PettyCash'?'selected':''}>Petty cash</option>`;
+  typeSel.onchange = ()=>{ state.trackerType = typeSel.value; render(); };
+  bar.appendChild(typeSel);
+  const recSel = document.createElement('select');
+  recSel.innerHTML = `
+    <option value="All" ${state.payFilter==='All'?'selected':''}>All payments (${paid.length})</option>
+    <option value="Unreconciled" ${state.payFilter==='Unreconciled'?'selected':''}>Not reconciled (${unrec.length})</option>
+    <option value="Reconciled" ${state.payFilter==='Reconciled'?'selected':''}>Reconciled (${paid.length-unrec.length})</option>`;
+  recSel.onchange = ()=>{ state.payFilter = recSel.value; render(); };
+  bar.appendChild(recSel);
+  const exBtn = document.createElement('button'); exBtn.className='btn'; exBtn.textContent='Export to Excel';
+  exBtn.onclick = ()=>{
+    const rows = shown.map(r=>({
+      'Payment date': r.check.date,
+      'Week of': mondayOf(r.check.date),
+      'Reference #': r.id,
+      'Type': r.type==='PO'?'Purchase order':'Petty cash',
+      'Payment method': r.paymentMethod||'',
+      'Check / payment ref': r.check.number||'',
+      'Payee': r.payee||r.supplier||'',
+      'Branch': r.branch||'',
+      'Amount (PHP)': Number(r.check.amount||r.amount||0),
+      'Description': r.title||'',
+      'Delivery date': (r.delivery&&r.delivery.confirmedAt)?r.delivery.confirmedAt.slice(0,10):'',
+      'Status': r.status,
+      'Reconciled': r.reconciledAt ? 'Yes' : 'NO',
+      'Reconciled by': r.reconciledBy||'',
+      'Reconciled on': r.reconciledAt?r.reconciledAt.slice(0,10):'',
+    }));
+    exportRowsToExcel(rows, 'Payment schedule', 'roshan-payment-schedule');
+  };
+  bar.appendChild(exBtn);
+  head.appendChild(bar);
+  el.appendChild(head);
+
+  if(!shown.length){
+    const e=document.createElement('div'); e.className='empty';
+    e.textContent = paid.length ? 'No payments match this filter.' : 'No payments recorded yet. Payments appear here once an Owner prepares the check or cash release.';
+    el.appendChild(e); return;
+  }
+
+  const note = document.createElement('div'); note.className='notice';
+  note.textContent = isSuper
+    ? 'Payments are grouped by week (Monday start). Tick each one off as you match it against the bank statement — the tick records who reconciled it and when.'
+    : 'Payments are grouped by week (Monday start). Only Owners and Supervisors can tick items off against the bank statement.';
+  el.appendChild(note);
+
+  // Group by week
+  const byWeek = {};
+  shown.forEach(r=>{ const w = mondayOf(r.check.date); (byWeek[w] = byWeek[w] || []).push(r); });
+  Object.keys(byWeek).sort((a,b)=>b.localeCompare(a)).forEach(week=>{
+    const list = byWeek[week].sort((a,b)=> (a.check.date||'').localeCompare(b.check.date||''));
+    const wTotal = list.reduce((s,r)=>s+Number((r.check&&r.check.amount)||r.amount||0),0);
+    const wUnrec = list.filter(r=>!r.reconciledAt).length;
+    const wHead = document.createElement('div'); wHead.className='section-head'; wHead.style.marginTop='22px';
+    wHead.innerHTML = `<h2 style="font-size:13px;">Week of ${fmtDate(week)} <span class="hint" style="text-transform:none;letter-spacing:0;">· ${list.length} payment${list.length===1?'':'s'} · ${fmtMoney(wTotal)}${wUnrec?` · <span style="color:var(--red-ink)">${wUnrec} unreconciled</span>`:' · all reconciled'}</span></h2>`;
+    el.appendChild(wHead);
+
+    const card = document.createElement('div'); card.className='card';
+    const scroll = document.createElement('div'); scroll.style.cssText='overflow-x:auto;';
+    const table = document.createElement('table'); table.className='simple'; table.style.minWidth='860px';
+    table.innerHTML = '<thead><tr><th>Payment date</th><th>Ref #</th><th>Type</th><th>Payee</th><th>Payment ref</th><th style="text-align:right">Amount</th><th>Delivery</th><th>Reconciled</th><th></th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    list.forEach(r=>{
+      const amt = Number((r.check&&r.check.amount)||r.amount||0);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${fmtDate(r.check.date)}</td>
+        <td>${r.id}</td>
+        <td>${r.type==='PO'?'<span class="badge ok">PO</span>':'<span class="badge neutral">Petty cash</span>'}</td>
+        <td>${escapeHtml(r.payee||r.supplier||'—')}</td>
+        <td style="font-family:var(--font-m)">${escapeHtml(r.check.number||'—')}</td>
+        <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(amt).replace('PHP ','')}</td>
+        <td>${(r.delivery&&r.delivery.confirmedAt)?fmtDate(r.delivery.confirmedAt.slice(0,10)):'<span class="hint">pending</span>'}</td>
+        <td>${r.reconciledAt?`<span class="badge ok">${fmtDate(r.reconciledAt.slice(0,10))}</span><div class="hint">${escapeHtml(r.reconciledBy||'')}</div>`:'<span class="badge flag">Not yet</span>'}</td>
+      `;
+      const td = document.createElement('td');
+      if(isSuper){
+        const b = document.createElement('button');
+        b.className = 'btn sm' + (r.reconciledAt ? ' ghost' : ' primary');
+        b.textContent = r.reconciledAt ? 'Undo' : '✓ Reconcile';
+        b.onclick = async ()=>{
+          b.disabled = true;
+          try{
+            const {request} = await apiPost(`/api/requests/${r.id}/action`, {action: r.reconciledAt ? 'unreconcile' : 'reconcile'});
+            upsertRequest(mapRequest(request));
+            render();
+          }catch(e){ alert(e.message); b.disabled=false; }
+        };
+        td.appendChild(b);
+      }
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    scroll.appendChild(table);
+    card.appendChild(scroll);
+    el.appendChild(card);
+  });
+}
+
 function renderPoTracker(el){
   if(!state.trackerType) state.trackerType = 'All';
+  if(!state.trackerView) state.trackerView = 'tracker';
+
+  const viewBar = document.createElement('div'); viewBar.className='toolbar'; viewBar.style.marginBottom='16px';
+  [{k:'tracker', l:'Request tracker'}, {k:'payments', l:'Payment schedule'}].forEach(v=>{
+    const b = document.createElement('button');
+    b.className = 'btn' + (state.trackerView===v.k ? ' primary' : '');
+    b.textContent = v.l;
+    b.onclick = ()=>{ state.trackerView = v.k; render(); };
+    viewBar.appendChild(b);
+  });
+  el.appendChild(viewBar);
+
+  if(state.trackerView==='payments') return renderPaymentSchedule(el);
+
   const allRows = activeRequests().filter(r=>r.type==='PO' || r.type==='PettyCash').sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
   const rows = state.trackerType==='All' ? allRows : allRows.filter(r=>r.type===state.trackerType);
 
@@ -2616,7 +2816,7 @@ function renderPoTracker(el){
   }
 
   const table = document.createElement('table'); table.className='simple';
-  table.innerHTML = `<thead><tr><th>Ref #</th><th>Type</th><th>Branch</th><th>Supplier / payee</th><th style="text-align:right">Check amount</th><th>Payment ref</th><th>Receipt filed</th><th>Variance</th><th>POS</th></tr></thead>`;
+  table.innerHTML = `<thead><tr><th>Ref #</th><th>Type</th><th>Branch</th><th>Supplier / payee</th><th style="text-align:right">Check amount</th><th>Payment ref</th><th>Payment date</th><th>Delivery date</th><th>Receipt filed</th><th>Variance</th><th>POS</th></tr></thead>`;
   const tbody = document.createElement('tbody');
   rows.forEach(r=>{
     const tr = document.createElement('tr');
@@ -2641,6 +2841,8 @@ function renderPoTracker(el){
       <td>${escapeHtml(r.supplier||r.payee)}</td>
       <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(checkAmt).replace('PHP ','')}</td>
       <td>${paymentRef}</td>
+      <td>${r.check && r.check.date ? fmtDate(r.check.date) : '<span class="hint">—</span>'}</td>
+      <td>${r.delivery && r.delivery.confirmedAt ? fmtDate(r.delivery.confirmedAt.slice(0,10)) : '<span class="hint">—</span>'}</td>
       <td><span class="badge ${receiptOk?'ok':'neutral'}">${receiptOk?'Yes':'Pending'}</span></td>
       <td>${varianceCell}</td>
       <td><span class="badge ${posOk?'ok':'neutral'}">${posOk?(posProof?'Recorded':'No proof'):'Pending'}</span></td>
