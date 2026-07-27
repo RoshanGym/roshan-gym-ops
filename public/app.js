@@ -1,3 +1,4 @@
+
 const SECTIONS = [
   {key:'tasks', label:'Daily tasks', sub:'Daily & weekly checklists, proof, and completion tracking.'},
   {key:'po', label:'Purchase orders', sub:'Order merchandise and supplies, tracked end to end.'},
