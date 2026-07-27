@@ -1,4 +1,3 @@
-
 const SECTIONS = [
   {key:'tasks', label:'Daily tasks', sub:'Daily & weekly checklists, proof, and completion tracking.'},
   {key:'po', label:'Purchase orders', sub:'Order merchandise and supplies, tracked end to end.'},
@@ -29,6 +28,7 @@ let state = {
   reqStatusFilter: null,
   salesTab: 'overview',
   salesBranch: 'All',
+  salesPeriod: 'month',
   targets: [],
   posPreview: null,
   trackerView: 'tracker',
@@ -126,6 +126,8 @@ async function apiPut(path, body){
   return data;
 }
 async function apiPatch(path, body){
+  const res = await fetch(path, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+  const data = await res.json().catch(()=>({}));
   if(!res.ok) throw new Error(data.error || 'Something went wrong.');
   return data;
 }
@@ -156,7 +158,13 @@ function mapRequest(r){
   };
 }
 function mapTask(t){ return {id:t.id, title:t.title, assignee:t.assignee, date:t.date, dueDate:t.due_date||null, notes:t.notes, status:t.status, createdBy:t.created_by, createdAt:t.created_at, completedBy:t.completed_by, completedAt:t.completed_at}; }
-function mapSale(s){ return {id:s.id, date:s.date, category:s.category, description:s.description, amount:Number(s.amount||0), method:s.method, enteredBy:s.entered_by, createdAt:s.created_at, branch:s.branch||'', availment:s.availment||'', discipline:s.discipline||'', saleKind:s.sale_kind||'', item:s.item||'', qty:Number(s.qty||1), importBatch:s.import_batch||null, source:s.source||'manual'}; }
+function mapSale(s){ return {id:s.id, date:normDate(s.date), category:s.category, description:s.description, amount:Number(s.amount||0), method:s.method, enteredBy:s.entered_by, createdAt:s.created_at, branch:s.branch||'', availment:s.availment||'', discipline:s.discipline||'', saleKind:s.sale_kind||'', item:s.item||'', qty:Number(s.qty||1), importBatch:s.import_batch||null, source:s.source||'manual'}; }
+// Coerce any date representation (ISO timestamp, Date, "YYYY-MM-DD") to "YYYY-MM-DD".
+function normDate(d){
+  if(!d) return '';
+  if(typeof d==='string') return d.slice(0,10);
+  try{ return new Date(d).toISOString().slice(0,10); }catch(e){ return String(d).slice(0,10); }
+}
 function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null}; }
 function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
 
@@ -2055,48 +2063,68 @@ function renderSalesOverview(el){
   const month = state.salesMonth;
   const [yr, mo] = month.split('-').map(Number);
   const branchFilter = state.salesBranch || 'All';
+  if(!state.salesPeriod) state.salesPeriod = 'month';
+  const ytd = state.salesPeriod === 'ytd';
 
-  let monthSales = state.sales.filter(s=>s.date.slice(0,7)===month);
-  if(branchFilter!=='All') monthSales = monthSales.filter(s=>salesBranchOf(s)===branchFilter);
-
-  const monthTotal = monthSales.reduce((s,x)=>s+x.amount,0);
+  // Sales set: either the selected month, or Jan..selected-month of that year.
+  const inScope = (s)=>{
+    if(branchFilter!=='All' && salesBranchOf(s)!==branchFilter) return false;
+    if(ytd) return Number(s.date.slice(0,4))===yr && s.date.slice(0,7)<=month;
+    return s.date.slice(0,7)===month;
+  };
+  const scoped = state.sales.filter(inScope);
+  const monthTotal = scoped.reduce((s,x)=>s+x.amount,0);
   const todaySales = state.sales.filter(s=>s.date===todayStr() && (branchFilter==='All'||salesBranchOf(s)===branchFilter));
   const todayTotal = todaySales.reduce((s,x)=>s+x.amount,0);
 
-  // target for this month + branch
-  const tgt = (state.targets||[]).find(t=>t.year===yr && t.month===mo && t.branch===(branchFilter==='All'?'All':branchFilter));
-  const minT = tgt? Number(tgt.min_target):0, medT = tgt? Number(tgt.medial_target):0, maxT = tgt? Number(tgt.max_target):0;
+  // Target: single month, or sum of Jan..selected month for YTD.
+  const tgtBranch = branchFilter==='All'?'All':branchFilter;
+  let minT=0, medT=0, maxT=0;
+  (state.targets||[]).forEach(t=>{
+    if(t.year!==yr || t.branch!==tgtBranch) return;
+    if(ytd ? (t.month<=mo) : (t.month===mo)){
+      minT+=Number(t.min_target); medT+=Number(t.medial_target); maxT+=Number(t.max_target);
+    }
+  });
   const pctToMin = minT? Math.round(monthTotal/minT*100):0;
+  const periodLabel = ytd ? `YTD (Jan–${MONTH_NAMES[mo-1]} ${yr})` : `${MONTH_NAMES[mo-1]} ${yr}`;
 
   // Filter bar
   const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
-  bar.innerHTML = `<input type="month" id="ov-month" value="${month}">`;
+  const modeSel = document.createElement('select');
+  modeSel.innerHTML = `<option value="month" ${!ytd?'selected':''}>Single month</option><option value="ytd" ${ytd?'selected':''}>Year to date</option>`;
+  modeSel.onchange = ()=>{ state.salesPeriod = modeSel.value; render(); };
+  bar.appendChild(modeSel);
+  const monthInput = document.createElement('input'); monthInput.type='month'; monthInput.id='ov-month'; monthInput.value=month;
+  bar.appendChild(monthInput);
   const brSel = document.createElement('select');
   brSel.innerHTML = ['All','Manila','Malabon'].map(b=>`<option value="${b}" ${branchFilter===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
   brSel.onchange = ()=>{ state.salesBranch = brSel.value; render(); };
   bar.appendChild(brSel);
   el.appendChild(bar);
-  bar.querySelector('#ov-month').onchange = (e)=>{ state.salesMonth = e.target.value; render(); };
+  monthInput.onchange = (e)=>{ state.salesMonth = e.target.value; render(); };
 
   // Metrics
   const metrics = document.createElement('div'); metrics.className='metrics';
   const overMin = monthTotal - minT;
   metrics.innerHTML = `
-    <div class="metric good"><div class="num">${fmtMoney(monthTotal).replace('PHP ','')}</div><div class="lbl">${MONTH_NAMES[mo-1]} ${yr} sales (PHP)</div></div>
+    <div class="metric good"><div class="num">${fmtMoney(monthTotal).replace('PHP ','')}</div><div class="lbl">${periodLabel} sales (PHP)</div></div>
     <div class="metric"><div class="num">${fmtMoney(todayTotal).replace('PHP ','')}</div><div class="lbl">Today (PHP)</div></div>
-    <div class="metric ${minT&&monthTotal>=minT?'good':'flag'}"><div class="num">${pctToMin}%</div><div class="lbl">of minimum target</div></div>
+    <div class="metric ${minT&&monthTotal>=minT?'good':'flag'}"><div class="num">${pctToMin}%</div><div class="lbl">of ${ytd?'YTD ':''}minimum target</div></div>
     <div class="metric ${overMin>=0?'good':'flag'}"><div class="num">${fmtMoney(Math.abs(overMin)).replace('PHP ','')}</div><div class="lbl">${overMin>=0?'over':'under'} minimum</div></div>
   `;
   el.appendChild(metrics);
+
+  const monthSales = scoped; // charts below use the scoped set
 
   if(!state.sales.length){
     const e=document.createElement('div'); e.className='empty'; e.textContent='No sales yet. Upload a POS report to get started.'; el.appendChild(e); return;
   }
 
   // Actual vs Target gauge
-  if(tgt){
+  if(minT){
     const gaugeCard = document.createElement('div'); gaugeCard.className='card';
-    gaugeCard.innerHTML = `<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:14px;">Actual vs Target — ${MONTH_NAMES[mo-1]} ${yr}${branchFilter!=='All'?(' · '+branchFilter):''}</h2>`;
+    gaugeCard.innerHTML = `<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:14px;">Actual vs Target — ${periodLabel}${branchFilter!=='All'?(' · '+branchFilter):''}</h2>`;
     const gauge = document.createElement('div');
     const cap = maxT||1;
     const seg = (val,color,label)=>{
@@ -2155,6 +2183,12 @@ function chartColors(n){
   const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
 }
 
+// Softer, muted palette for pies and bars (easier on the eye than the vivid set).
+function chartPalette(n){
+  const base = ['#c96b6b','#d1a56b','#7fae82','#7f9dc4','#a892c4','#c48fa8','#6faeb2','#c4b07f','#8fbf9a','#b89ca8'];
+  const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
+}
+
 function drawTrendChart(canvas, year, branch){
   if(typeof Chart==='undefined') return;
   const actual = new Array(12).fill(0);
@@ -2182,24 +2216,53 @@ function drawCategoryChart(canvas, sales){
   if(typeof Chart==='undefined') return;
   const by={}; sales.forEach(s=>by[s.category]=(by[s.category]||0)+s.amount);
   const labels=Object.keys(by), data=labels.map(l=>by[l]);
+  const total=data.reduce((a,b)=>a+b,0)||1;
   if(canvas._chart) canvas._chart.destroy();
   canvas._chart = new Chart(canvas, {
     type:'doughnut',
-    data:{ labels, datasets:[{data, backgroundColor:chartColors(labels.length), borderColor:'#0d0d0f', borderWidth:2}]},
-    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#c9d1d9', font:{size:11}}}} }
+    data:{ labels, datasets:[{data, backgroundColor:chartPalette(labels.length), borderColor:'#0d0d0f', borderWidth:2}]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{
+          position:'right',
+          labels:{
+            color:'#c9d1d9', font:{size:11}, padding:10,
+            generateLabels:(chart)=>{
+              const d=chart.data.datasets[0].data;
+              return chart.data.labels.map((lab,i)=>({
+                text: `${lab}  ${(d[i]/total*100).toFixed(1)}%`,
+                fillStyle: chart.data.datasets[0].backgroundColor[i],
+                strokeStyle: chart.data.datasets[0].backgroundColor[i],
+                index:i
+              }));
+            }
+          }
+        },
+        tooltip:{ callbacks:{ label:(c)=>` ${fmtMoney(c.parsed)} (${(c.parsed/total*100).toFixed(1)}%)` } }
+      }
+    }
   });
 }
 
 function drawAdminChart(canvas, sales){
   if(typeof Chart==='undefined') return;
-  const by={}; sales.forEach(s=>{ const a=s.enteredBy||'Unknown'; by[a]=(by[a]||0)+s.amount; });
+  const by={}; sales.forEach(s=>{ const a=(s.enteredBy&&s.enteredBy.trim())||'Unknown'; by[a]=(by[a]||0)+s.amount; });
   const entries=Object.entries(by).sort((a,b)=>b[1]-a[1]);
   const labels=entries.map(e=>e[0]), data=entries.map(e=>e[1]);
   if(canvas._chart) canvas._chart.destroy();
   canvas._chart = new Chart(canvas, {
     type:'bar',
-    data:{ labels, datasets:[{label:'Sales (PHP)', data, backgroundColor:chartColors(labels.length), borderRadius:4}]},
-    options:{...chartOpts(), indexAxis:'y'}
+    data:{ labels, datasets:[{label:'Sales (PHP)', data, backgroundColor:chartPalette(labels.length), borderRadius:4}]},
+    options:{
+      indexAxis:'y',
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(c)=>' '+fmtMoney(c.parsed.x)}} },
+      scales:{
+        x:{ ticks:{color:'#8b949e', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'} },
+        y:{ type:'category', ticks:{color:'#c9d1d9', font:{size:12}}, grid:{display:false} }
+      }
+    }
   });
 }
 
@@ -2210,7 +2273,7 @@ function drawDisciplineChart(canvas, maSales){
   if(canvas._chart) canvas._chart.destroy();
   canvas._chart = new Chart(canvas, {
     type:'polarArea',
-    data:{ labels, datasets:[{data, backgroundColor:chartColors(labels.length).map(c=>c+'cc')}]},
+    data:{ labels, datasets:[{data, backgroundColor:chartPalette(labels.length).map(c=>c+'cc')}]},
     options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#c9d1d9', font:{size:11}}}}, scales:{r:{ticks:{display:false}, grid:{color:'rgba(255,255,255,.08)'}}} }
   });
 }
