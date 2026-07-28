@@ -2151,7 +2151,7 @@ function renderSalesOverview(el){
 
   // Sales set: either the selected month, or Jan..selected-month of that year.
   const inScope = (s)=>{
-    if(!isCoreSale(s)) return false; // Drinks & Merchandise has its own dashboard
+    if(!isPosSale(s) || !isCoreSale(s)) return false; // POS core only
     if(branchFilter!=='All' && salesBranchOf(s)!==branchFilter) return false;
     if(ytd) return Number(s.date.slice(0,4))===yr && s.date.slice(0,7)<=month;
     return s.date.slice(0,7)===month;
@@ -2276,7 +2276,7 @@ function chartPalette(n){
 function drawTrendChart(canvas, year, branch){
   if(typeof Chart==='undefined') return;
   const actual = new Array(12).fill(0);
-  state.sales.filter(s=>isCoreSale(s) && Number(s.date.slice(0,4))===year && (branch==='All'||salesBranchOf(s)===branch))
+  state.sales.filter(s=>isPosSale(s) && isCoreSale(s) && Number(s.date.slice(0,4))===year && (branch==='All'||salesBranchOf(s)===branch))
     .forEach(s=>{ const m=Number(s.date.slice(5,7))-1; actual[m]+=s.amount; });
   const tb = branch==='All'?'All':branch;
   const minA=new Array(12).fill(0), medA=new Array(12).fill(0), maxA=new Array(12).fill(0);
@@ -2332,6 +2332,10 @@ function drawCategoryChart(canvas, sales){
 // Drinks & Merchandise is tracked in its own separate dashboard, not in these
 // sales reports. Exclude it everywhere so category/service/admin all align.
 function isCoreSale(s){ return (s.category||'') !== 'Drinks & Merchandise'; }
+// POS-sourced sales feed the category/service/target reports. Admin-tracker
+// rows feed ONLY the Admin Sales Performance report — keep them apart.
+function isPosSale(s){ return s.source !== 'admin-tracker'; }
+function isAdminSale(s){ return s.source === 'admin-tracker'; }
 
 function drawAdminChart(canvas, sales){
   if(typeof Chart==='undefined') return;
@@ -2675,11 +2679,10 @@ function renderSalesReports(el){
   const reports = [
     {k:'category', l:'1 · By Category'},
     {k:'service', l:'2 · By Service'},
-    {k:'mvm', l:'3 · Month vs Month'},
+    {k:'mvm', l:'3 · Month vs Month Sales'},
     {k:'target', l:'4 · Sales vs Target'},
-    {k:'targetcat', l:'5 · Target by Category'},
-    {k:'admin', l:'6 · By Admin'},
-    {k:'targetadmin', l:'7 · Target by Admin'},
+    {k:'admin', l:'5 · Admin Sales Performance'},
+    {k:'datacheck', l:'✓ Data Check'},
   ];
   reports.forEach(r=>{
     const b=document.createElement('button');
@@ -2697,7 +2700,7 @@ function renderSalesReports(el){
   bar.appendChild(brSel);
 
   // period mode only relevant to some reports
-  if(['target','targetcat','targetadmin'].includes(state.reportWhich)){
+  if(['target','admin'].includes(state.reportWhich)){
     const pSel=document.createElement('select');
     pSel.innerHTML=[['month','Monthly'],['quarter','Quarterly'],['year','Yearly']].map(([v,l])=>`<option value="${v}" ${state.reportPeriod===v?'selected':''}>${l}</option>`).join('');
     pSel.onchange=()=>{ state.reportPeriod=pSel.value; render(); };
@@ -2716,14 +2719,14 @@ function renderSalesReports(el){
   else if(which==='service') reportByService(host);
   else if(which==='mvm') reportMonthVsMonth(host);
   else if(which==='target') reportVsTarget(host);
-  else if(which==='targetcat') reportTargetByCategory(host);
-  else if(which==='admin') reportByAdmin(host);
-  else if(which==='targetadmin') reportTargetByAdmin(host);
+  else if(which==='admin') reportAdminPerformance(host);
+  else if(which==='datacheck') reportDataCheck(host);
 }
 
 // helpers
 function salesInScope(branch, ym){
   return state.sales.filter(s=>{
+    if(!isPosSale(s)) return false;  // admin-tracker rows are for the Admin report only
     if(!isCoreSale(s)) return false; // Drinks & Merchandise lives in its own dashboard
     if(branch!=='All' && (s.branch||'')!==branch) return false;
     if(ym && s.date.slice(0,7)!==ym) return false;
@@ -2755,7 +2758,7 @@ function reportByCategory(host){
   );
 }
 
-// ---- Report 2: by service (same field; explicit service ordering + branch split) ----
+// ---- Report 2: by service + detailed category breakdown ----
 function reportByService(host){
   const ym=state.reportMonth, branch=state.reportBranch;
   const sales=salesInScope(branch, ym);
@@ -2779,6 +2782,21 @@ function reportByService(host){
         {label:'Manila',data:mnl,backgroundColor:'#7f9dc4',borderRadius:4},
         {label:'Malabon',data:mbn,backgroundColor:'#c96b6b',borderRadius:4}]},options:barOpts()});},30);
   }
+
+  // Detailed category breakdown (per your POS report categories)
+  const detCard=sectionCard(host,'Sales per category (detailed)');
+  const byDet={};
+  sales.forEach(s=>{ const d=(s.description||s.item||s.category||'—'); byDet[d]=(byDet[d]||0)+s.amount; });
+  const detPairs=Object.entries(byDet).sort((a,b)=>b[1]-a[1]);
+  const dt=document.createElement('table'); dt.className='simple'; dt.style.width='100%';
+  dt.innerHTML='<thead><tr><th>Category</th><th style="text-align:right">Sales</th><th style="text-align:right">Share</th></tr></thead>';
+  const dtb=document.createElement('tbody');
+  detPairs.forEach(([k,v])=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${escapeHtml(k)}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(v).replace('PHP ','')}</td><td style="text-align:right">${(v/total*100).toFixed(1)}%</td>`;
+    dtb.appendChild(tr);
+  });
+  dt.appendChild(dtb); detCard.appendChild(dt);
 }
 
 // ---- Report 3: month vs month, both branches ----
@@ -2848,79 +2866,125 @@ function reportVsTarget(host){
         r.min?(r.actual/r.min*100).toFixed(0)+'%':'—',
         fmtMoney(r.med).replace('PHP ',''), fmtMoney(r.max).replace('PHP ','')];
     }), rows.map(r=>r.actual>=r.min&&r.min>0));
+
+  // Sales drivers: actual sales by service, sorted high-to-low, for the whole period shown
+  const allMonths = period==='month' ? [Number(state.reportMonth.slice(5,7))]
+    : period==='quarter' ? Object.keys(QUARTERS).filter(m=>QUARTERS[m]===QUARTERS[Number(state.reportMonth.slice(5,7))]).map(Number)
+    : [1,2,3,4,5,6,7,8,9,10,11,12];
+  const driverSales = state.sales.filter(s=>isPosSale(s)&&isCoreSale(s)&&Number(s.date.slice(0,4))===yr&&allMonths.includes(Number(s.date.slice(5,7)))&&(branch==='All'||s.branch===branch));
+  const bySvc={}; driverSales.forEach(s=>{ const c=SERVICES_ORDER.includes(s.category)?s.category:'OTHERS'; bySvc[c]=(bySvc[c]||0)+s.amount; });
+  const dtotal=Object.values(bySvc).reduce((a,b)=>a+b,0)||1;
+  const driverPairs=Object.entries(bySvc).sort((a,b)=>b[1]-a[1]);
+  const dcard=sectionCard(host,'Main sales drivers (actual, highest to lowest)');
+  twoCol(dcard,
+    (c)=>barhCanvas(c, driverPairs.map(p=>p[0]), driverPairs.map(p=>p[1])),
+    (c)=>breakdownTable(c, driverPairs, dtotal)
+  );
 }
 
-// ---- Report 5: sales vs target by category ----
-function reportTargetByCategory(host){
+
+// ---- Report 5: Admin Sales Performance (from Admin Tracker, targets included) ----
+function reportAdminPerformance(host){
   const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
-  let months=[]; let plabel='';
-  if(period==='month'){ const m=Number(state.reportMonth.slice(5,7)); months=[m]; plabel=monthLabel(state.reportMonth); }
-  else if(period==='quarter'){ const q=QUARTERS[Number(state.reportMonth.slice(5,7))];
-    months=Object.keys(QUARTERS).filter(m=>QUARTERS[m]===q).map(Number); plabel=`${q} ${yr}`; }
-  else { months=[1,2,3,4,5,6,7,8,9,10,11,12]; plabel=String(yr); }
-
-  const sales=state.sales.filter(s=>isCoreSale(s) && Number(s.date.slice(0,4))===yr && months.includes(Number(s.date.slice(5,7))) && (branch==='All'||s.branch===branch));
-  const by={}; SERVICES_ORDER.forEach(s=>by[s]=0);
-  sales.forEach(s=>{ const c=SERVICES_ORDER.includes(s.category)?s.category:'OTHERS'; by[c]+=s.amount; });
-  const total=Object.values(by).reduce((a,b)=>a+b,0);
-  const t=targetFor(yr,branch,months);
-  titleCard(host,`Sales vs Target by Category — ${plabel}${branch!=='All'?' · '+branch:''}`, total,
-    t.min?`${(total/t.min*100).toFixed(1)}% of minimum (${fmtMoney(t.min)})`:'');
-
-  const pairs=SERVICES_ORDER.map(s=>[s,by[s]]).filter(p=>p[1]>0);
-  twoCol(host,(c)=>pieCanvas(c,pairs.map(p=>p[0]),pairs.map(p=>p[1])),(c)=>breakdownTable(c,pairs,total));
-
-  // category share vs overall target contribution
-  const note=document.createElement('div'); note.className='notice';
-  note.innerHTML = `The pie shows each service's share of actual sales. The combined minimum target for ${plabel} is <strong>${fmtMoney(t.min)}</strong>; actual is <strong>${fmtMoney(total)}</strong> (${t.min?(total/t.min*100).toFixed(1):'—'}%). Category-level targets aren't set individually — this shows where the sales are coming from against the overall goal.`;
-  host.appendChild(note);
-}
-
-// ---- Report 6: by admin ----
-function reportByAdmin(host){
-  const ym=state.reportMonth, branch=state.reportBranch;
-  const sales=salesInScope(branch,ym).filter(s=>s.enteredBy && s.enteredBy.trim() && isCoreSale(s));
-  const by={}; sales.forEach(s=>{ const a=s.enteredBy.trim(); by[a]=(by[a]||0)+s.amount; });
-  const total=Object.values(by).reduce((a,b)=>a+b,0);
-  titleCard(host,`Sales by Admin — ${monthLabel(ym)}${branch!=='All'?' · '+branch:''}`, total);
-  if(!Object.keys(by).length){
-    const e=document.createElement('div'); e.className='notice';
-    e.textContent='No admin-tagged sales for this month yet. Per-admin data comes from daily POS uploads (each shift\u2019s upload is tagged to its admin). Historical months loaded from monthly branch reports have no admin split.';
-    host.appendChild(e); return;
-  }
-  const pairs=Object.entries(by).sort((a,b)=>b[1]-a[1]);
-  twoCol(host,(c)=>pieCanvas(c,pairs.map(p=>p[0]),pairs.map(p=>p[1])),(c)=>breakdownTable(c,pairs,total));
-}
-
-// ---- Report 7: target by admin ----
-function reportTargetByAdmin(host){
-  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
-  let months=[]; let plabel='';
+  let months=[], plabel='';
   if(period==='month'){ months=[Number(state.reportMonth.slice(5,7))]; plabel=monthLabel(state.reportMonth); }
   else if(period==='quarter'){ const q=QUARTERS[Number(state.reportMonth.slice(5,7))];
     months=Object.keys(QUARTERS).filter(m=>QUARTERS[m]===q).map(Number); plabel=`${q} ${yr}`; }
   else { months=[1,2,3,4,5,6,7,8,9,10,11,12]; plabel=String(yr); }
 
-  const sales=state.sales.filter(s=>Number(s.date.slice(0,4))===yr && months.includes(Number(s.date.slice(5,7))) && (branch==='All'||s.branch===branch) && s.enteredBy && s.enteredBy.trim() && isCoreSale(s));
-  const by={}; sales.forEach(s=>{ const a=s.enteredBy.trim(); by[a]=(by[a]||0)+s.amount; });
+  // ADMIN data only (from the Admin Sales Tracker), never the POS category data.
+  const sales=state.sales.filter(s=>isAdminSale(s) && Number(s.date.slice(0,4))===yr
+    && months.includes(Number(s.date.slice(5,7))) && (branch==='All'||s.branch===branch));
+  const by={}; sales.forEach(s=>{ const a=(s.enteredBy||'').trim()||'Unknown'; by[a]=(by[a]||0)+s.amount; });
   const total=Object.values(by).reduce((a,b)=>a+b,0);
   const t=targetFor(yr,branch,months);
-  titleCard(host,`Sales vs Target by Admin — ${plabel}${branch!=='All'?' · '+branch:''}`, total,
-    t.min?`team at ${(total/t.min*100).toFixed(1)}% of minimum`:'');
+
+  titleCard(host, `Admin Sales Performance — ${plabel}${branch!=='All'?' · '+branch:''}`, total,
+    t.min?`team at ${(total/t.min*100).toFixed(1)}% of minimum target (${fmtMoney(t.min)})`:'');
+
   if(!Object.keys(by).length){
     const e=document.createElement('div'); e.className='notice';
-    e.textContent='No admin-tagged sales in this period yet. This report fills in from daily POS uploads going forward.';
+    e.textContent='No admin sales data for this period. This report is powered by the Admin Sales Tracker; going forward, each shift\u2019s POS upload (tagged to its admin) adds to it.';
     host.appendChild(e); return;
   }
-  const pairs=Object.entries(by).sort((a,b)=>b[1]-a[1]);
-  // each admin's contribution to the target
-  const rows=pairs.map(([a,v])=>[a, fmtMoney(v).replace('PHP ',''), (total?(v/total*100).toFixed(1):'0')+'%', t.min?(v/t.min*100).toFixed(1)+'%':'—']);
-  twoCol(host,(c)=>barhCanvas(c,pairs.map(p=>p[0]),pairs.map(p=>p[1])),
-    (c)=>tableFrom(c,['Admin','Sales','Share','of team min target'],rows));
 
+  const pairs=Object.entries(by).sort((a,b)=>b[1]-a[1]);
+  twoCol(host,
+    (c)=>barhCanvas(c, pairs.map(p=>p[0]), pairs.map(p=>p[1])),
+    (c)=>pieCanvas(c, pairs.map(p=>p[0]), pairs.map(p=>p[1]))
+  );
+
+  // Table with target context
+  const tcard=sectionCard(host,'Per-admin detail vs target');
+  const rows=pairs.map(([a,v])=>[
+    a, fmtMoney(v).replace('PHP ',''),
+    (total?(v/total*100).toFixed(1):'0')+'%',
+    t.min?(v/t.min*100).toFixed(1)+'%':'—'
+  ]);
+  tableFrom(tcard, ['Admin','Sales','Share of team','of team min target'], rows);
+
+  // Team vs target summary bar
+  if(t.min){
+    const scard=sectionCard(host,'Team total vs target');
+    const cv=document.createElement('canvas'); cv.style.maxHeight='150px'; scard.appendChild(cv);
+    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+      cv._c=new Chart(cv,{type:'bar',data:{labels:['Team'],datasets:[
+        {label:'Actual',data:[total],backgroundColor:total>=t.min?'#7fae82':'#c96b6b',borderRadius:4},
+        {label:'Min target',data:[t.min],backgroundColor:'rgba(255,255,255,.15)',borderRadius:4},
+      ]},options:{...barOpts(), indexAxis:'y'}});},30);
+  }
+  const note=document.createElement('div'); note.className='notice';
+  note.textContent='Admin Sales Performance is sourced from the Roshan Gym Admin Sales Tracker (core services, excludes Drinks & Merchandise). Targets are the branch monthly targets for the selected period.';
+  host.appendChild(note);
 }
 
-// ===== shared render helpers =====
+// ---- Data Check: verify loaded totals against source files ----
+function reportDataCheck(host){
+  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch;
+  const intro=document.createElement('div'); intro.className='notice';
+  intro.innerHTML='Compare these dashboard totals against the <strong>TOTAL GROSS</strong> at the bottom of each POS Sales Breakdown file. They should match (core services; Drinks & Merchandise shown separately). Going forward, every POS upload shows its grand total on the review screen before you import.';
+  host.appendChild(intro);
+
+  // POS core totals by month/branch
+  const posMonthly={}, merchMonthly={}, adminMonthly={};
+  state.sales.forEach(s=>{
+    const y=Number(s.date.slice(0,4)); if(y!==yr) return;
+    const m=Number(s.date.slice(5,7)); const b=s.branch||'—';
+    if(branch!=='All' && b!==branch) return;
+    const key=`${m}|${b}`;
+    if(s.source==='admin-tracker'){ adminMonthly[key]=(adminMonthly[key]||0)+s.amount; }
+    else if((s.category||'')==='Drinks & Merchandise'){ merchMonthly[key]=(merchMonthly[key]||0)+s.amount; }
+    else { posMonthly[key]=(posMonthly[key]||0)+s.amount; }
+  });
+
+  const card=sectionCard(host,`Loaded totals by month — ${yr}`);
+  const t=document.createElement('table'); t.className='simple'; t.style.width='100%';
+  t.innerHTML='<thead><tr><th>Month</th><th>Branch</th><th style="text-align:right">Core services (POS)</th><th style="text-align:right">Drinks & Merch</th><th style="text-align:right">Admin tracker</th></tr></thead>';
+  const tb=document.createElement('tbody');
+  const branches = branch==='All'?['Manila','Malabon']:[branch];
+  let anyRow=false;
+  for(let m=1;m<=12;m++){
+    branches.forEach(b=>{
+      const k=`${m}|${b}`;
+      const pos=posMonthly[k]||0, mer=merchMonthly[k]||0, adm=adminMonthly[k]||0;
+      if(pos===0&&mer===0&&adm===0) return;
+      anyRow=true;
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${MONTH_NAMES[m-1]}</td><td>${escapeHtml(b)}</td>
+        <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(pos).replace('PHP ','')}</td>
+        <td style="text-align:right;font-family:var(--font-m)">${mer?fmtMoney(mer).replace('PHP ',''):'—'}</td>
+        <td style="text-align:right;font-family:var(--font-m)">${adm?fmtMoney(adm).replace('PHP ',''):'—'}</td>`;
+      tb.appendChild(tr);
+    });
+  }
+  t.appendChild(tb); card.appendChild(t);
+  if(!anyRow) card.innerHTML+='<div class="empty">No data loaded for this year.</div>';
+
+  // Note about admin vs POS difference
+  const n2=document.createElement('div'); n2.className='notice';
+  n2.innerHTML='<strong>Why two columns can differ:</strong> "Core services (POS)" comes from the POS Sales Breakdown files and drives reports 1–4. "Admin tracker" comes from the Roshan Gym Admin Sales Tracker and drives report 5 only. They cover the same sales from different systems, so small differences are normal.';
+  host.appendChild(n2);
+}
 function monthLabel(ym){ const [y,m]=ym.split('-'); return `${MONTH_NAMES[Number(m)-1]} ${y}`; }
 function titleCard(host,title,total,subtitle){
   const c=document.createElement('div'); c.className='card';
