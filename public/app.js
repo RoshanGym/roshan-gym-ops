@@ -27,6 +27,11 @@ let state = {
   memberFilter: 'All',
   trackerType: 'All',
   reqStatusFilter: null,
+  reqRequestor: null,
+  reqDateFrom: {PO:'', PettyCash:''},
+  reqDateTo: {PO:'', PettyCash:''},
+  trackerFrom: '', trackerTo: '',
+  payFrom: '', payTo: '',
   salesTab: 'overview',
   salesBranch: 'All',
   salesPeriod: 'month',
@@ -165,6 +170,31 @@ function normDate(d){
   if(!d) return '';
   if(typeof d==='string') return d.slice(0,10);
   try{ return new Date(d).toISOString().slice(0,10); }catch(e){ return String(d).slice(0,10); }
+}
+// Build a From/To date-range control. onChange(from,to) fires on any change.
+// getFrom/getTo return the current stored values.
+function dateRangeControl(getFrom, getTo, onChange){
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:inline-flex;align-items:center;gap:6px;';
+  const from = document.createElement('input'); from.type='date'; from.value=getFrom()||''; from.title='From date';
+  const to = document.createElement('input'); to.type='date'; to.value=getTo()||''; to.title='To date';
+  const dash = document.createElement('span'); dash.textContent='→'; dash.style.color='var(--ink-2)';
+  const clear = document.createElement('button'); clear.className='btn sm ghost'; clear.textContent='Clear'; clear.title='Clear date range';
+  clear.style.display = (getFrom()||getTo()) ? '' : 'none';
+  from.onchange = ()=>onChange(from.value, to.value);
+  to.onchange = ()=>onChange(from.value, to.value);
+  clear.onclick = ()=>onChange('', '');
+  const lbl = document.createElement('span'); lbl.className='hint'; lbl.textContent='Dates:'; lbl.style.marginRight='2px';
+  wrap.appendChild(lbl); wrap.appendChild(from); wrap.appendChild(dash); wrap.appendChild(to); wrap.appendChild(clear);
+  return wrap;
+}
+// True if a YYYY-MM-DD date is within [from,to] (either bound optional).
+function inDateRange(dateStr, from, to){
+  if(!dateStr) return true;
+  const d = normDate(dateStr);
+  if(from && d < from) return false;
+  if(to && d > to) return false;
+  return true;
 }
 function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null}; }
 function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
@@ -1376,10 +1406,29 @@ function renderRequestsSection(el, type){
   statusSel.onchange = ()=>{ state.reqStatusFilter[type] = statusSel.value; render(); };
   btnGroup.appendChild(statusSel);
 
+  // Date range (by request creation date)
+  const rFrom = ()=> (state.reqDateFrom[type]||''), rTo = ()=> (state.reqDateTo[type]||'');
+  const rangeCtl = dateRangeControl(rFrom, rTo, (f,t)=>{ state.reqDateFrom[type]=f; state.reqDateTo[type]=t; render(); });
+  btnGroup.appendChild(rangeCtl);
+  const inRange = (r)=> inDateRange(r.createdAt, rFrom(), rTo());
+
+  // Requestor filter — built from who actually has requests of this type
+  if(!state.reqRequestor) state.reqRequestor = {PO:'All', PettyCash:'All'};
+  const requestorOf = (r)=> (r.requestor || r.createdBy || '').trim();
+  const requestors = [...new Set(allOfType.map(requestorOf).filter(Boolean))].sort();
+  const reqFilter = state.reqRequestor[type] || 'All';
+  const reqSel = document.createElement('select');
+  reqSel.innerHTML = [`<option value="All" ${reqFilter==='All'?'selected':''}>All requestors</option>`,
+    ...requestors.map(n=>`<option value="${escapeHtml(n)}" ${reqFilter===n?'selected':''}>${escapeHtml(n)}</option>`)].join('');
+  reqSel.onchange = ()=>{ state.reqRequestor[type] = reqSel.value; render(); };
+  btnGroup.appendChild(reqSel);
+  const matchesRequestor = (r)=> reqFilter==='All' || requestorOf(r)===reqFilter;
+
   const exportBtn = document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
   exportBtn.onclick = ()=>{
     const list = allOfType
       .filter(r=>statusFilter==='All' || r.status===statusFilter)
+      .filter(inRange).filter(matchesRequestor)
       .sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
     const suffix = statusFilter==='All' ? '' : '-' + statusFilter.toLowerCase().replace(/[^a-z0-9]+/g,'-');
     exportRequestsToExcel(list, type==='PO'?'Purchase Orders':'Petty Cash', (type==='PO'?'roshan-purchase-orders':'roshan-petty-cash') + suffix);
@@ -1396,10 +1445,15 @@ function renderRequestsSection(el, type){
 
   const list = allOfType
     .filter(r=>statusFilter==='All' || r.status===statusFilter)
+    .filter(inRange).filter(matchesRequestor)
     .sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
   if(list.length===0){
     const e = document.createElement('div'); e.className='empty';
-    if(statusFilter!=='All'){
+    if(reqFilter!=='All'){
+      e.textContent = 'No ' + (type==='PO'?'purchase orders':'reimbursement requests') + ' from ' + reqFilter + (rFrom()||rTo()?' in that date range':'') + '.';
+    } else if(rFrom()||rTo()){
+      e.textContent = 'No ' + (type==='PO'?'purchase orders':'reimbursement requests') + ' in the selected date range.';
+    } else if(statusFilter!=='All'){
       const idx = STAGES.findIndex(s=>s.key===statusFilter);
       const label = statusFilter==='Rejected' ? 'rejected' : stageShort(type, idx).toLowerCase();
       e.textContent = 'No ' + (type==='PO'?'purchase orders':'reimbursement requests') + ' at "' + label + '" right now.';
@@ -3050,6 +3104,7 @@ function renderPaymentSchedule(el){
   const paid = activeRequests()
     .filter(r=>r.check && r.check.number && r.check.date)
     .filter(r=>state.trackerType==='All' || r.type===state.trackerType)
+    .filter(r=>inDateRange(r.check.date, state.payFrom, state.payTo))
     .sort((a,b)=> (b.check.date||'').localeCompare(a.check.date||''));
 
   const shown = state.payFilter==='All' ? paid
@@ -3089,6 +3144,8 @@ function renderPaymentSchedule(el){
     <option value="Reconciled" ${state.payFilter==='Reconciled'?'selected':''}>Reconciled (${paid.length-unrec.length})</option>`;
   recSel.onchange = ()=>{ state.payFilter = recSel.value; render(); };
   bar.appendChild(recSel);
+  const payRange = dateRangeControl(()=>state.payFrom, ()=>state.payTo, (f,t)=>{ state.payFrom=f; state.payTo=t; render(); });
+  bar.appendChild(payRange);
   const exBtn = document.createElement('button'); exBtn.className='btn'; exBtn.textContent='Export to Excel';
   exBtn.onclick = ()=>{
     const rows = shown.map(r=>({
@@ -3197,7 +3254,9 @@ function renderPoTracker(el){
   if(state.trackerView==='payments') return renderPaymentSchedule(el);
 
   const allRows = activeRequests().filter(r=>r.type==='PO' || r.type==='PettyCash').sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
-  const rows = state.trackerType==='All' ? allRows : allRows.filter(r=>r.type===state.trackerType);
+  const inTrackerRange = (r)=> inDateRange(r.createdAt, state.trackerFrom, state.trackerTo);
+  const rowsByType = state.trackerType==='All' ? allRows : allRows.filter(r=>r.type===state.trackerType);
+  const rows = rowsByType.filter(inTrackerRange);
 
   const totalPOs = rows.length;
   const matched = rows.filter(r=>r.check && r.check.number && r.delivery && r.delivery.confirmedAt).length;
@@ -3232,6 +3291,8 @@ function renderPoTracker(el){
   `;
   typeSel.onchange = ()=>{ state.trackerType = typeSel.value; render(); };
   tbar.appendChild(typeSel);
+  const trackerRange = dateRangeControl(()=>state.trackerFrom, ()=>state.trackerTo, (f,t)=>{ state.trackerFrom=f; state.trackerTo=t; render(); });
+  tbar.appendChild(trackerRange);
   const exportBtn = document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
   const exportName = state.trackerType==='PO' ? 'roshan-po-tracker-purchase-orders'
     : state.trackerType==='PettyCash' ? 'roshan-po-tracker-petty-cash' : 'roshan-po-tracker';
@@ -3247,7 +3308,7 @@ function renderPoTracker(el){
   }
 
   const table = document.createElement('table'); table.className='simple';
-  table.innerHTML = `<thead><tr><th>Ref #</th><th>Type</th><th>Branch</th><th>Supplier / payee</th><th style="text-align:right">Check amount</th><th>Payment ref</th><th>Payment date</th><th>Delivery date</th><th>Receipt filed</th><th>Variance</th><th>POS</th></tr></thead>`;
+  table.innerHTML = `<thead><tr><th>Ref #</th><th>Type</th><th>Branch</th><th>Requestor</th><th>Supplier / payee</th><th style="text-align:right">Check amount</th><th>Payment ref</th><th>Payment date</th><th>Delivery date</th><th>Receipt filed</th><th>Variance</th><th>POS</th></tr></thead>`;
   const tbody = document.createElement('tbody');
   rows.forEach(r=>{
     const tr = document.createElement('tr');
@@ -3269,6 +3330,7 @@ function renderPoTracker(el){
       <td>${r.id}</td>
       <td>${typeBadge}</td>
       <td>${escapeHtml(r.branch||'—')}</td>
+      <td>${escapeHtml(r.requestor||r.createdBy||'—')}</td>
       <td>${escapeHtml(r.supplier||r.payee)}</td>
       <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(checkAmt).replace('PHP ','')}</td>
       <td>${paymentRef}</td>
@@ -3300,13 +3362,14 @@ function renderPoTracker(el){
       const dCard = document.createElement('div'); dCard.className='card';
       const dScroll = document.createElement('div'); dScroll.style.cssText='overflow-x:auto;';
       const dTable = document.createElement('table'); dTable.className='simple';
-      dTable.innerHTML = '<thead><tr><th>Reference #</th><th>Type</th><th>Description</th><th>Supplier / payee</th><th style="text-align:right">Amount</th><th>Deleted by</th><th>Deleted on</th><th></th></tr></thead>';
+      dTable.innerHTML = '<thead><tr><th>Reference #</th><th>Type</th><th>Requestor</th><th>Description</th><th>Supplier / payee</th><th style="text-align:right">Amount</th><th>Deleted by</th><th>Deleted on</th><th></th></tr></thead>';
       const dBody = document.createElement('tbody');
       deleted.forEach(r=>{
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${r.id}</td>
           <td>${r.type==='PO' ? '<span class="badge ok">Purchase order</span>' : '<span class="badge neutral">Petty cash</span>'}</td>
+          <td>${escapeHtml(r.requestor||r.createdBy||'—')}</td>
           <td>${escapeHtml(r.title)}</td>
           <td>${escapeHtml(r.supplier||r.payee)}</td>
           <td style="text-align:right;font-family:var(--font-m)">${fmtMoney(r.amount).replace('PHP ','')}</td>
