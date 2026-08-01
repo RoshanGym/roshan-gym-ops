@@ -2154,125 +2154,61 @@ function renderSales(el){
 
 // ---------- OVERVIEW: metrics + charts + actual vs target ----------
 function renderSalesOverview(el){
-  const month = state.salesMonth;
-  const [yr, mo] = month.split('-').map(Number);
-  const branchFilter = state.salesBranch || 'All';
-  if(!state.salesPeriod) state.salesPeriod = 'month';
-  const ytd = state.salesPeriod === 'ytd';
-
-  // Sales set: either the selected month, or Jan..selected-month of that year.
-  const inScope = (s)=>{
-    if(!isPosSale(s) || !isCoreSale(s)) return false; // POS core only
-    if(branchFilter!=='All' && salesBranchOf(s)!==branchFilter) return false;
-    if(ytd) return Number(s.date.slice(0,4))===yr && s.date.slice(0,7)<=month;
-    return s.date.slice(0,7)===month;
-  };
-  const scoped = state.sales.filter(inScope);
-  const monthTotal = scoped.reduce((s,x)=>s+x.amount,0);
-  const todaySales = state.sales.filter(s=>s.date===todayStr() && (branchFilter==='All'||salesBranchOf(s)===branchFilter));
+  if(!state.salesPeriod) state.salesPeriod='month';
+  periodFilterBar(el, SKEYS, {branch:true});
+  const branch = state.salesBranch || 'All';
+  const P = resolvePeriod(state.salesPeriod, state.salesMonth, state.salesQuarter);
+  const yr=P.yr;
+  const scoped = salesInPeriod(branch, yr, P.months);
+  const periodTotal = scoped.reduce((s,x)=>s+x.amount,0);
+  const todaySales = state.sales.filter(s=>isPosSale(s)&&isCoreSale(s)&&s.date===todayStr() && (branch==='All'||salesBranchOf(s)===branch));
   const todayTotal = todaySales.reduce((s,x)=>s+x.amount,0);
+  const t = targetFor(yr, branch, P.months);
+  const minT=t.min, medT=t.med, maxT=t.max;
+  const pctToMin = minT? Math.round(periodTotal/minT*100):0;
+  const periodLabel = P.label;
 
-  // Target: single month, or sum of Jan..selected month for YTD.
-  const tgtBranch = branchFilter==='All'?'All':branchFilter;
-  let minT=0, medT=0, maxT=0;
-  (state.targets||[]).forEach(t=>{
-    if(t.year!==yr || t.branch!==tgtBranch) return;
-    if(ytd ? (t.month<=mo) : (t.month===mo)){
-      minT+=Number(t.min_target); medT+=Number(t.medial_target); maxT+=Number(t.max_target);
-    }
-  });
-  const pctToMin = minT? Math.round(monthTotal/minT*100):0;
-  const periodLabel = ytd ? `YTD (Jan–${MONTH_NAMES[mo-1]} ${yr})` : `${MONTH_NAMES[mo-1]} ${yr}`;
-
-  // Filter bar
-  const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
-  const modeSel = document.createElement('select');
-  modeSel.innerHTML = `<option value="month" ${!ytd?'selected':''}>Single month</option><option value="ytd" ${ytd?'selected':''}>Year to date</option>`;
-  modeSel.onchange = ()=>{ state.salesPeriod = modeSel.value; render(); };
-  bar.appendChild(modeSel);
-  const monthInput = document.createElement('input'); monthInput.type='month'; monthInput.id='ov-month'; monthInput.value=month;
-  bar.appendChild(monthInput);
-  const brSel = document.createElement('select');
-  brSel.innerHTML = ['All','Manila','Malabon'].map(b=>`<option value="${b}" ${branchFilter===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
-  brSel.onchange = ()=>{ state.salesBranch = brSel.value; render(); };
-  bar.appendChild(brSel);
-  el.appendChild(bar);
-  monthInput.onchange = (e)=>{ state.salesMonth = e.target.value; render(); };
-
-  // Metrics
-  const metrics = document.createElement('div'); metrics.className='metrics';
-  const overMin = monthTotal - minT;
-  metrics.innerHTML = `
-    <div class="metric good"><div class="num">${fmtMoney(monthTotal).replace('PHP ','')}</div><div class="lbl">${periodLabel} sales (PHP)</div></div>
-    <div class="metric"><div class="num">${fmtMoney(todayTotal).replace('PHP ','')}</div><div class="lbl">Today (PHP)</div></div>
-    <div class="metric ${minT&&monthTotal>=minT?'good':'flag'}"><div class="num">${pctToMin}%</div><div class="lbl">of ${ytd?'YTD ':''}minimum target</div></div>
-    <div class="metric ${overMin>=0?'good':'flag'}"><div class="num">${fmtMoney(Math.abs(overMin)).replace('PHP ','')}</div><div class="lbl">${overMin>=0?'over':'under'} minimum</div></div>
-  `;
+  const metrics=document.createElement('div'); metrics.className='metrics';
+  const overMin=periodTotal-minT;
+  metrics.innerHTML=`
+    <div class="metric good"><div class="num">${money(periodTotal)}</div><div class="lbl">${periodLabel} sales (PHP)</div></div>
+    <div class="metric"><div class="num">${money(todayTotal)}</div><div class="lbl">Today (PHP)</div></div>
+    <div class="metric ${minT&&periodTotal>=minT?'good':'flag'}"><div class="num">${pctToMin}%</div><div class="lbl">of minimum target</div></div>
+    <div class="metric ${overMin>=0?'good':'flag'}"><div class="num">${money(Math.abs(overMin))}</div><div class="lbl">${overMin>=0?'over':'under'} minimum</div></div>`;
   el.appendChild(metrics);
 
-  const monthSales = scoped; // charts below use the scoped set
+  if(!state.sales.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No sales yet. Upload a POS report to get started.'; el.appendChild(e); return; }
 
-  if(!state.sales.length){
-    const e=document.createElement('div'); e.className='empty'; e.textContent='No sales yet. Upload a POS report to get started.'; el.appendChild(e); return;
-  }
-
-  // Actual vs Target gauge
   if(minT){
-    const gaugeCard = document.createElement('div'); gaugeCard.className='card';
-    gaugeCard.innerHTML = `<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:14px;">Actual vs Target — ${periodLabel}${branchFilter!=='All'?(' · '+branchFilter):''}</h2>`;
-    const gauge = document.createElement('div');
-    const cap = maxT||1;
-    const seg = (val,color,label)=>{
-      const pct = Math.min(100, val/cap*100);
-      return `<div style="margin-bottom:10px;">
-        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);margin-bottom:3px;"><span>${label}</span><span>${fmtMoney(val).replace('PHP ','')}</span></div>
-        <div class="bt" style="height:10px;position:relative;"><div class="bf" style="width:${pct}%;background:${color};"></div></div></div>`;
-    };
-    gauge.innerHTML =
-      seg(monthTotal, monthTotal>=minT?'var(--lime)':'var(--amber)', 'Actual') +
-      seg(minT, 'rgba(255,255,255,.25)', 'Minimum target') +
-      seg(medT, 'rgba(255,255,255,.25)', 'Medial target') +
-      seg(maxT, 'rgba(255,255,255,.25)', 'Max target');
-    gaugeCard.appendChild(gauge);
-    el.appendChild(gaugeCard);
+    const gaugeCard=document.createElement('div'); gaugeCard.className='card';
+    gaugeCard.innerHTML=`<h2 style="font-size:14px;color:#ffffff;margin-bottom:14px;">Actual vs Target — ${periodLabel}${branch!=='All'?(' · '+branch):''}</h2>`;
+    const gauge=document.createElement('div'); const cap=maxT||1;
+    const seg=(val,color,label)=>{ const pct=Math.min(100,val/cap*100);
+      return `<div style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;font-size:12px;color:#c9d1d9;margin-bottom:3px;"><span>${label}</span><span>${money(val)}</span></div><div class="bt" style="height:10px;position:relative;"><div class="bf" style="width:${pct}%;background:${color};"></div></div></div>`; };
+    gauge.innerHTML=seg(periodTotal, periodTotal>=minT?'var(--lime)':'var(--amber)','Actual')+seg(minT,'rgba(255,255,255,.25)','Minimum target')+seg(medT,'rgba(255,255,255,.25)','Medial target')+seg(maxT,'rgba(255,255,255,.25)','Max target');
+    gaugeCard.appendChild(gauge); el.appendChild(gaugeCard);
   }
 
-  // Chart: monthly trend (actual vs targets across the year)
-  const trendCard = document.createElement('div'); trendCard.className='card';
-  trendCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Monthly actual vs target</h2>';
-  const c1 = document.createElement('canvas'); c1.style.maxHeight='260px'; trendCard.appendChild(c1);
-  el.appendChild(trendCard);
+  const trendCard=document.createElement('div'); trendCard.className='card';
+  trendCard.innerHTML='<h2 style="font-size:14px;color:#ffffff;margin-bottom:12px;">Monthly actual vs target</h2>';
+  const c1=document.createElement('canvas'); c1.style.maxHeight='260px'; trendCard.appendChild(c1); el.appendChild(trendCard);
+  const catCard=document.createElement('div'); catCard.className='card';
+  catCard.innerHTML='<h2 style="font-size:14px;color:#ffffff;margin-bottom:12px;">Sales by category</h2>';
+  const c2=document.createElement('canvas'); c2.style.maxHeight='260px'; catCard.appendChild(c2); el.appendChild(catCard);
 
-  // Chart: by category (doughnut)
-  const catCard = document.createElement('div'); catCard.className='card';
-  catCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Sales by category</h2>';
-  const c2 = document.createElement('canvas'); c2.style.maxHeight='260px'; catCard.appendChild(c2);
-  el.appendChild(catCard);
+  const maSales=scoped.filter(s=>s.category==='MARTIAL ARTS');
+  let c4=null;
+  if(maSales.length){ const maCard=document.createElement('div'); maCard.className='card';
+    maCard.innerHTML='<h2 style="font-size:14px;color:#ffffff;margin-bottom:12px;">Martial arts by discipline</h2>';
+    c4=document.createElement('canvas'); c4.style.maxHeight='220px'; maCard.appendChild(c4); el.appendChild(maCard); }
 
-  // Chart: per admin
-  const adminCard = document.createElement('div'); adminCard.className='card';
-  adminCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Sales per admin</h2>';
-  const c3 = document.createElement('canvas'); c3.style.maxHeight='260px'; adminCard.appendChild(c3);
-  el.appendChild(adminCard);
+  setTimeout(()=>{ drawTrendChart(c1, yr, branch); drawCategoryChart(c2, scoped); if(c4) drawDisciplineChart(c4, maSales); },30);
 
-  // Martial arts discipline breakdown (if any)
-  const maSales = monthSales.filter(s=>s.category==='MARTIAL ARTS');
-  if(maSales.length){
-    const maCard = document.createElement('div'); maCard.className='card';
-    maCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Martial arts by discipline</h2>';
-    const c4 = document.createElement('canvas'); c4.style.maxHeight='220px'; maCard.appendChild(c4);
-    el.appendChild(maCard);
-    setTimeout(()=>drawDisciplineChart(c4, maSales), 30);
-  }
-
-  // Draw charts after they're in the DOM
-  setTimeout(()=>{
-    drawTrendChart(c1, yr, branchFilter);
-    drawCategoryChart(c2, monthSales);
-    drawAdminChart(c3, monthSales);
-  }, 30);
+  // Actual vs Target numbers per month (replaces Sales-per-admin) — instruction 2
+  monthlyActualVsTargetTable(el, yr, branch, 12);
+  // Summary & recommendations — instruction 4
+  renderPerfNarrative(el, yr, branch, 12);
 }
-
 function chartColors(n){
   const base = ['#e5231b','#f0a020','#3fb950','#58a6ff','#bc8cff','#f778ba','#56d4dd','#e3b341','#7ee787','#ff9bce'];
   const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
@@ -2283,6 +2219,33 @@ function chartPalette(n){
   const base = ['#c96b6b','#d1a56b','#7fae82','#7f9dc4','#a892c4','#c48fa8','#6faeb2','#c4b07f','#8fbf9a','#b89ca8'];
   const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
 }
+
+// Inline plugin: draw the % share directly on each pie/doughnut slice (white),
+// so users don't have to hover. Self-contained — no external plugin needed.
+const pieLabelPlugin = {
+  id:'pieLabels',
+  afterDatasetsDraw(chart){
+    const ds=chart.data.datasets && chart.data.datasets[0];
+    if(!ds) return;
+    const total=ds.data.reduce((a,b)=>a+(Number(b)||0),0)||1;
+    const meta=chart.getDatasetMeta(0);
+    const ctx=chart.ctx;
+    ctx.save();
+    ctx.fillStyle='#ffffff';
+    ctx.font='600 12px system-ui, sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.shadowColor='rgba(0,0,0,.55)'; ctx.shadowBlur=3;
+    meta.data.forEach((arc,i)=>{
+      const v=Number(ds.data[i])||0;
+      const pct=v/total*100;
+      if(pct<4) return; // skip slivers to avoid clutter
+      let p;
+      try{ p=arc.getCenterPoint(); }catch(e){ p={x:arc.x,y:arc.y}; }
+      ctx.fillText(pct.toFixed(1)+'%', p.x, p.y);
+    });
+    ctx.restore();
+  }
+};
 
 function drawTrendChart(canvas, year, branch){
   if(typeof Chart==='undefined') return;
@@ -2315,6 +2278,7 @@ function drawCategoryChart(canvas, sales){
   if(canvas._chart) canvas._chart.destroy();
   canvas._chart = new Chart(canvas, {
     type:'doughnut',
+    plugins:[pieLabelPlugin],
     data:{ labels, datasets:[{data, backgroundColor:chartPalette(labels.length), borderColor:'#0d0d0f', borderWidth:2}]},
     options:{
       responsive:true, maintainAspectRatio:false,
@@ -2322,7 +2286,7 @@ function drawCategoryChart(canvas, sales){
         legend:{
           position:'right',
           labels:{
-            color:'#c9d1d9', font:{size:11}, padding:10,
+            color:'#ffffff', font:{size:11}, padding:10,
             generateLabels:(chart)=>{
               const d=chart.data.datasets[0].data;
               return chart.data.labels.map((lab,i)=>({
@@ -2362,8 +2326,8 @@ function drawAdminChart(canvas, sales){
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(c)=>' '+fmtMoney(c.parsed.x)}} },
       scales:{
-        x:{ ticks:{color:'#8b949e', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'} },
-        y:{ type:'category', ticks:{color:'#c9d1d9', font:{size:12}}, grid:{display:false} }
+        x:{ ticks:{color:'#c9d1d9', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'} },
+        y:{ type:'category', ticks:{color:'#ffffff', font:{size:12}}, grid:{display:false} }
       }
     }
   });
@@ -2377,17 +2341,17 @@ function drawDisciplineChart(canvas, maSales){
   canvas._chart = new Chart(canvas, {
     type:'polarArea',
     data:{ labels, datasets:[{data, backgroundColor:chartPalette(labels.length).map(c=>c+'cc')}]},
-    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#c9d1d9', font:{size:11}}}}, scales:{r:{ticks:{display:false}, grid:{color:'rgba(255,255,255,.08)'}}} }
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#ffffff', font:{size:11}}}}, scales:{r:{ticks:{display:false}, grid:{color:'rgba(255,255,255,.08)'}}} }
   });
 }
 
 function chartOpts(){
   return {
     responsive:true, maintainAspectRatio:false,
-    plugins:{legend:{labels:{color:'#c9d1d9', font:{size:11}}}},
+    plugins:{legend:{labels:{color:'#ffffff', font:{size:11}}}},
     scales:{
-      x:{ticks:{color:'#8b949e', font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'}},
-      y:{ticks:{color:'#8b949e', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'}}
+      x:{ticks:{color:'#c9d1d9', font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'}},
+      y:{ticks:{color:'#c9d1d9', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'}}
     }
   };
 }
@@ -2858,12 +2822,14 @@ function reportMonthVsMonth(host){
 }
 
 // ---- Report 4: sales vs target (monthly / quarterly / yearly) ----
-function reportVsTarget(host){
+function reportVsTarget(host, opts){
+  opts=opts||{};
+  const showChart=opts.chart!==false, showTitle=opts.title!==false;
   const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
   let buckets=[];
-  if(period==='month'){ for(let m=1;m<=12;m++) buckets.push({label:MONTH_NAMES[m-1],months:[m]}); }
-  else if(period==='quarter'){ buckets=[{label:'Q1',months:[1,2,3]},{label:'Q2',months:[4,5,6]},{label:'Q3',months:[7,8,9]},{label:'Q4',months:[10,11,12]}]; }
-  else buckets=[{label:String(yr),months:[1,2,3,4,5,6,7,8,9,10,11,12]}];
+  if(period==='quarter'){ buckets=[{label:'Q1',months:[1,2,3]},{label:'Q2',months:[4,5,6]},{label:'Q3',months:[7,8,9]},{label:'Q4',months:[10,11,12]}]; }
+  else if(period==='ytd'){ const endM=Number(state.reportMonth.slice(5,7)); for(let m=1;m<=endM;m++) buckets.push({label:MONTH_NAMES[m-1],months:[m]}); }
+  else { for(let m=1;m<=12;m++) buckets.push({label:MONTH_NAMES[m-1],months:[m]}); }
 
   const rows=buckets.map(bk=>{
     const actual=bk.months.reduce((sum,m)=>sum+salesInScope(branch,`${yr}-${String(m).padStart(2,'0')}`).reduce((a,b)=>a+b.amount,0),0);
@@ -2872,18 +2838,20 @@ function reportVsTarget(host){
   }).filter(r=>r.actual>0 || r.min>0);
 
   const totActual=rows.reduce((a,b)=>a+b.actual,0), totMin=rows.reduce((a,b)=>a+b.min,0);
-  titleCard(host, `Sales vs Target (${period}) — ${yr}${branch!=='All'?' · '+branch:''}`, totActual,
+  if(showTitle) titleCard(host, `Sales vs Target (${period}) — ${yr}${branch!=='All'?' · '+branch:''}`, totActual,
     totMin?`${(totActual/totMin*100).toFixed(1)}% of minimum target`:'');
 
-  const card=sectionCard(host,'Actual vs targets');
-  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; card.appendChild(cv);
-  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{data:{labels:rows.map(r=>r.label),datasets:[
-      {type:'bar',label:'Actual',data:rows.map(r=>r.actual),backgroundColor:rows.map(r=>r.actual>=r.min&&r.min>0?'#7fae82':'#c96b6b'),borderRadius:4,order:3},
-      {type:'line',label:'Min',data:rows.map(r=>r.min),borderColor:'#d1a56b',borderWidth:2,pointRadius:0,tension:.2,order:1},
-      {type:'line',label:'Medial',data:rows.map(r=>r.med),borderColor:'#7f9dc4',borderWidth:1.5,borderDash:[5,4],pointRadius:0,order:1},
-      {type:'line',label:'Max',data:rows.map(r=>r.max),borderColor:'#a892c4',borderWidth:1.5,borderDash:[2,3],pointRadius:0,order:1},
-    ]},options:barOpts()});},30);
+  if(showChart){
+    const card=sectionCard(host,'Actual vs targets');
+    const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; card.appendChild(cv);
+    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+      cv._c=new Chart(cv,{data:{labels:rows.map(r=>r.label),datasets:[
+        {type:'bar',label:'Actual',data:rows.map(r=>r.actual),backgroundColor:rows.map(r=>r.actual>=r.min&&r.min>0?'#7fae82':'#c96b6b'),borderRadius:4,order:3},
+        {type:'line',label:'Min',data:rows.map(r=>r.min),borderColor:'#d1a56b',borderWidth:2,pointRadius:0,tension:.2,order:1},
+        {type:'line',label:'Medial',data:rows.map(r=>r.med),borderColor:'#7f9dc4',borderWidth:1.5,borderDash:[5,4],pointRadius:0,order:1},
+        {type:'line',label:'Max',data:rows.map(r=>r.max),borderColor:'#a892c4',borderWidth:1.5,borderDash:[2,3],pointRadius:0,order:1},
+      ]},options:barOpts()});},30);
+  }
 
   const tcard=sectionCard(host,'Detail');
   tableFrom(tcard,['Period','Actual','Min target','vs Min','Attainment','Medial','Max'],
@@ -2898,7 +2866,7 @@ function reportVsTarget(host){
   // Sales drivers: actual sales by service, sorted high-to-low, for the whole period shown
   const allMonths = period==='month' ? [Number(state.reportMonth.slice(5,7))]
     : period==='quarter' ? Object.keys(QUARTERS).filter(m=>QUARTERS[m]===QUARTERS[Number(state.reportMonth.slice(5,7))]).map(Number)
-    : [1,2,3,4,5,6,7,8,9,10,11,12];
+    : (function(){ const e=Number(state.reportMonth.slice(5,7)); const a=[]; for(let m=1;m<=e;m++)a.push(m); return a; })();
   const driverSales = state.sales.filter(s=>isPosSale(s)&&isCoreSale(s)&&Number(s.date.slice(0,4))===yr&&allMonths.includes(Number(s.date.slice(5,7)))&&(branch==='All'||s.branch===branch));
   const bySvc={}; driverSales.forEach(s=>{ const c=SERVICES_ORDER.includes(s.category)?s.category:'OTHERS'; bySvc[c]=(bySvc[c]||0)+s.amount; });
   const dtotal=Object.values(bySvc).reduce((a,b)=>a+b,0)||1;
@@ -3080,9 +3048,163 @@ function salesReportFilterBar(host, opts){
   host.appendChild(bar);
 }
 
+// ---- Unified period filter: Monthly / Quarterly / YTD (instruction 3) ----
+const RKEYS = {period:'reportPeriod', month:'reportMonth', quarter:'reportQuarter', branch:'reportBranch'};
+const SKEYS = {period:'salesPeriod', month:'salesMonth', quarter:'salesQuarter', branch:'salesBranch'};
+function distinctYears(){
+  const ys=new Set();
+  state.sales.forEach(s=>{ if(isPosSale(s)&&isCoreSale(s)) ys.add(Number(s.date.slice(0,4))); });
+  return ys.size?[...ys].sort():[Number((state.reportMonth||'2026-06').slice(0,4))];
+}
+function resolvePeriod(periodVal, monthVal, quarterVal){
+  monthVal = monthVal || '2026-06';
+  const yr=Number(monthVal.slice(0,4));
+  if(periodVal==='quarter'){
+    const q=quarterVal || QUARTERS[Number(monthVal.slice(5,7))] || 'Q1';
+    const months=Object.keys(QUARTERS).filter(k=>QUARTERS[k]===q).map(Number);
+    return {yr, months, label:`${q} ${yr}`, kind:'quarter', q};
+  }
+  if(periodVal==='ytd'){
+    const endM=Number(monthVal.slice(5,7));
+    const months=[]; for(let m=1;m<=endM;m++) months.push(m);
+    return {yr, months, label:`YTD (Jan–${MONTH_NAMES[endM-1]} ${yr})`, kind:'ytd', endM};
+  }
+  const m=Number(monthVal.slice(5,7));
+  return {yr, months:[m], label:monthLabel(monthVal), kind:'month', m};
+}
+function periodFilterBar(host, keys, opts){
+  opts=opts||{};
+  const bar=document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
+  if(opts.branch){
+    const brSel=document.createElement('select');
+    brSel.innerHTML=['All','Manila','Malabon'].map(b=>`<option value="${b}" ${state[keys.branch]===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
+    brSel.onchange=()=>{ state[keys.branch]=brSel.value; render(); };
+    bar.appendChild(brSel);
+  }
+  const period=state[keys.period]||'month';
+  const pSel=document.createElement('select');
+  pSel.innerHTML=[['month','Monthly'],['quarter','Quarterly'],['ytd','YTD']].map(([v,l])=>`<option value="${v}" ${period===v?'selected':''}>${l}</option>`).join('');
+  pSel.onchange=()=>{ state[keys.period]=pSel.value; render(); };
+  bar.appendChild(pSel);
+  const cur=state[keys.month]||'2026-06'; const yr=Number(cur.slice(0,4));
+  if(period==='month'){
+    const mInput=document.createElement('input'); mInput.type='month'; mInput.value=cur;
+    mInput.onchange=(e)=>{ state[keys.month]=e.target.value; render(); };
+    bar.appendChild(mInput);
+  } else {
+    const years=distinctYears();
+    const ySel=document.createElement('select');
+    ySel.innerHTML=years.map(y=>`<option value="${y}" ${yr===y?'selected':''}>${y}</option>`).join('');
+    ySel.onchange=(e)=>{ state[keys.month]=e.target.value+'-'+cur.slice(5,7); render(); };
+    bar.appendChild(ySel);
+    if(period==='quarter'){
+      const q=state[keys.quarter] || QUARTERS[Number(cur.slice(5,7))] || 'Q1';
+      const qSel=document.createElement('select');
+      qSel.innerHTML=['Q1','Q2','Q3','Q4'].map(x=>`<option value="${x}" ${q===x?'selected':''}>${x}</option>`).join('');
+      qSel.onchange=()=>{ state[keys.quarter]=qSel.value; render(); };
+      bar.appendChild(qSel);
+    }
+  }
+  host.appendChild(bar);
+}
+
+// Monthly Actual vs Target table (numbers summary) — used in Overview + Branch perf.
+function monthlyActualVsTargetTable(host, yr, branch, endM){
+  endM = endM || 12;
+  const minT=minTargetSeries(yr, branch);
+  const rows=[];
+  let prev=null, totA=0, totMin=0;
+  for(let m=1;m<=endM;m++){
+    const actual=salesInPeriod(branch,yr,[m]).reduce((a,b)=>a+b.amount,0);
+    const min=minT[m-1]||0;
+    if(actual===0 && min===0) continue;
+    const ou=actual-min;
+    const attain=min?(actual/min*100):0;
+    const mom = (prev!==null && prev>0) ? ((actual-prev)/prev*100) : null;
+    rows.push([MONTH_NAMES[m-1], money(actual), money(min),
+      (ou>=0?'+':'')+money(Math.abs(ou)),
+      min?attain.toFixed(0)+'%':'—',
+      mom===null?'—':(mom>=0?'+':'')+mom.toFixed(1)+'%']);
+    totA+=actual; totMin+=min; prev=actual;
+  }
+  const card=sectionCard(host, `Actual vs target by month${branch!=='All'?' · '+branch:''}`);
+  tableFrom(card, ['Month','Actual','Min target','Over/Under','Attainment','MoM Δ'], rows,
+    rows.map((r,i)=>{ const a=parseFloat(r[1].replace(/,/g,'')), mn=parseFloat(r[2].replace(/,/g,'')); return mn?a>=mn:true; }));
+  // summary row
+  const ou=totA-totMin;
+  const sum=document.createElement('div'); sum.className='notice';
+  sum.innerHTML=`<strong>Total:</strong> Actual ${fmtMoney(totA)} vs min target ${fmtMoney(totMin)} — `
+    +`${totMin?(totA/totMin*100).toFixed(1):'—'}% attainment, ${ou>=0?'over':'under'} by ${fmtMoney(Math.abs(ou))}.`;
+  card.appendChild(sum);
+  return {totA, totMin};
+}
+
+// Data-driven performance summary + improvement steps (instruction 4).
+function renderPerfNarrative(host, yr, branch, endM){
+  endM = endM || 12;
+  const minT=minTargetSeries(yr, branch);
+  const mrows=[];
+  for(let m=1;m<=endM;m++){
+    const actual=salesInPeriod(branch,yr,[m]).reduce((a,b)=>a+b.amount,0);
+    const min=minT[m-1]||0;
+    if(actual===0 && min===0) continue;
+    mrows.push({m, actual, min, attain:min?actual/min*100:0});
+  }
+  if(!mrows.length) return;
+  const totA=mrows.reduce((a,b)=>a+b.actual,0), totMin=mrows.reduce((a,b)=>a+b.min,0);
+  const attain=totMin?totA/totMin*100:0;
+  const hit=mrows.filter(r=>r.min&&r.actual>=r.min).length;
+  const withMin=mrows.filter(r=>r.min>0);
+  const best=withMin.slice().sort((a,b)=>b.attain-a.attain)[0];
+  const worst=withMin.slice().sort((a,b)=>a.attain-b.attain)[0];
+  const first=mrows[0], last=mrows[mrows.length-1];
+  const trendPct=first.actual?((last.actual-first.actual)/first.actual*100):0;
+  // top / weakest category over the window
+  const wSales=salesInPeriod(branch,yr,mrows.map(r=>r.m));
+  const byCat={}; wSales.forEach(s=>{ const c=s.category||'OTHERS'; byCat[c]=(byCat[c]||0)+s.amount; });
+  const catPairs=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+  const topCat=catPairs[0], lowCat=catPairs[catPairs.length-1];
+
+  const card=sectionCard(host,'Summary & recommendations');
+  const p=document.createElement('div'); p.style.cssText='color:var(--ink-1);line-height:1.6;font-size:13px;';
+  const gap=totMin-totA;
+  p.innerHTML =
+    `Through this period, ${branch==='All'?'both branches':branch} booked <strong>${fmtMoney(totA)}</strong> against a minimum target of <strong>${fmtMoney(totMin)}</strong> — `
+    +`<strong>${attain.toFixed(1)}%</strong> attainment, ${gap<=0?'ahead of':'short of'} minimum by ${fmtMoney(Math.abs(gap))}. `
+    +`${hit} of ${mrows.length} month${mrows.length===1?'':'s'} cleared the minimum. `
+    +(best?`Strongest month was <strong>${MONTH_NAMES[best.m-1]}</strong> (${best.attain.toFixed(0)}% of target); weakest was <strong>${MONTH_NAMES[worst.m-1]}</strong> (${worst.attain.toFixed(0)}%). `:'')
+    +`Sales ${trendPct>=0?'rose':'fell'} ${Math.abs(trendPct).toFixed(0)}% from ${MONTH_NAMES[first.m-1]} to ${MONTH_NAMES[last.m-1]}. `
+    +(topCat?`<strong>${topCat[0]}</strong> is the biggest driver (${(topCat[1]/totA*100).toFixed(0)}% of sales)`:'')
+    +(lowCat&&catPairs.length>1?`, while <strong>${lowCat[0]}</strong> trails at ${(lowCat[1]/totA*100).toFixed(0)}%.`:'.');
+  card.appendChild(p);
+
+  const steps=[];
+  if(gap>0){
+    steps.push(`Close the ${fmtMoney(gap)} gap to minimum: at recent run-rate that's roughly ${fmtMoney(gap/Math.max(mrows.length,1))} more per month.`);
+  } else {
+    steps.push(`You're above minimum — push toward the medial/max tier by protecting the months that already over-perform.`);
+  }
+  if(worst && best && worst.attain < best.attain*0.8){
+    steps.push(`Investigate ${MONTH_NAMES[worst.m-1]} (only ${worst.attain.toFixed(0)}% of target) — check staffing, promos, or seasonality versus ${MONTH_NAMES[best.m-1]}.`);
+  }
+  if(topCat) steps.push(`Lean into ${topCat[0]} (your top earner) with renewals/upsells, and build a small campaign to lift ${lowCat&&catPairs.length>1?lowCat[0]:'the lagging services'}.`);
+  if(branch==='All'){
+    const mnlT=salesInPeriod('Manila',yr,mrows.map(r=>r.m)).reduce((a,b)=>a+b.amount,0);
+    const mbnT=salesInPeriod('Malabon',yr,mrows.map(r=>r.m)).reduce((a,b)=>a+b.amount,0);
+    const lag = mnlT<mbnT?'Manila':'Malabon';
+    steps.push(`${lag} is the smaller contributor this period — replicate the stronger branch's winning mix there.`);
+  }
+  const ul=document.createElement('ul'); ul.style.cssText='margin:12px 0 0 18px;color:var(--ink-1);line-height:1.6;font-size:13px;';
+  steps.forEach(s=>{ const li=document.createElement('li'); li.innerHTML=s; ul.appendChild(li); });
+  card.appendChild(ul);
+  const dis=document.createElement('div'); dis.className='hint'; dis.style.marginTop='8px';
+  dis.textContent='Auto-generated from the loaded figures — a starting point for discussion, not financial advice.';
+  card.appendChild(dis);
+}
+
 // ---- Sub-tab 1: Performance per Branch (Month vs Month + Sales vs Target) ----
 function renderBranchPerf(host){
-  salesReportFilterBar(host, {branch:true, period:true});
+  periodFilterBar(host, RKEYS, {branch:true});
   if(!state.sales.length){ reportEmpty(host); return; }
   const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch;
   const months=[]; for(let m=1;m<=12;m++) months.push(`${yr}-${String(m).padStart(2,'0')}`);
@@ -3122,16 +3244,18 @@ function renderBranchPerf(host){
   }
 
   const div=document.createElement('div'); div.style.cssText='height:1px;background:var(--line);margin:22px 0;'; host.appendChild(div);
-  reportVsTarget(host); // "Sales vs Target is okay" — reused unchanged.
+  // Actual performance vs targets as a numbers report (replaces the old bar chart),
+  // then the Detail table and main sales drivers.
+  monthlyActualVsTargetTable(host, yr, branch, 12);
+  reportVsTarget(host, {chart:false, title:false});
 }
 
 // ---- Sub-tab 2: Sales by Category ----
 function renderCategoryReport(host){
-  salesReportFilterBar(host, {branch:true, period:true});
+  periodFilterBar(host, RKEYS, {branch:true});
   if(!state.sales.length){ reportEmpty(host); return; }
-  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
-  const mArr=periodMonths(period, state.reportMonth);
-  const plabel=periodLabelFor(period, state.reportMonth, yr);
+  const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
+  const yr=P.yr, branch=state.reportBranch, mArr=P.months, plabel=P.label;
   const sales=salesInPeriod(branch, yr, mArr);
   const by={}; sales.forEach(s=>{ const c=s.category||'OTHERS'; by[c]=(by[c]||0)+s.amount; });
   const total=Object.values(by).reduce((a,b)=>a+b,0);
@@ -3139,37 +3263,49 @@ function renderCategoryReport(host){
   const pairs=Object.entries(by).sort((a,b)=>b[1]-a[1]);
   twoCol(host, (c)=>pieCanvas(c, pairs.map(p=>p[0]), pairs.map(p=>p[1])), (c)=>breakdownTable(c, pairs, total||1));
 
+  // --- Per-category branch comparison, month by month (instruction 6) ---
   const cats=pairs.map(p=>p[0]);
-  const mcard=sectionCard(host,'Month-by-month by category'+(branch!=='All'?` · ${branch}`:''));
+  const catOptions = cats.length?cats:['GYM'];
+  if(!state.reportCategory || !catOptions.includes(state.reportCategory)) state.reportCategory = catOptions[0];
+  const selCat = state.reportCategory;
+  const mcard=sectionCard(host, `${selCat} performance by month${branch!=='All'?' · '+branch:' · branch comparison'}`);
+  const cs=document.createElement('select'); cs.style.marginBottom='12px';
+  cs.innerHTML=catOptions.map(c=>`<option value="${escapeHtml(c)}" ${c===selCat?'selected':''}>${escapeHtml(c)}</option>`).join('');
+  cs.onchange=()=>{ state.reportCategory=cs.value; render(); };
+  mcard.appendChild(cs);
   const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
-  const palette=chartPalette(Math.max(cats.length,1));
-  const ds=cats.map((cat,i)=>({label:cat,
-    data:[1,2,3,4,5,6,7,8,9,10,11,12].map(m=>salesInPeriod(branch,yr,[m]).filter(x=>(x.category||'OTHERS')===cat).reduce((a,b)=>a+b.amount,0)),
-    backgroundColor:palette[i],borderRadius:3}));
-  const stackedOpts={...barOpts()};
-  stackedOpts.scales={x:{stacked:true,ticks:{color:'#8b949e',font:{size:10}},grid:{color:'rgba(255,255,255,.05)'}},
-    y:{stacked:true,ticks:{color:'#8b949e',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}}};
+  const MI=[1,2,3,4,5,6,7,8,9,10,11,12];
+  const catMnl=MI.map(m=>salesInPeriod('Manila',yr,[m]).filter(x=>(x.category||'OTHERS')===selCat).reduce((a,b)=>a+b.amount,0));
+  const catMbn=MI.map(m=>salesInPeriod('Malabon',yr,[m]).filter(x=>(x.category||'OTHERS')===selCat).reduce((a,b)=>a+b.amount,0));
+  const dsets=[];
+  if(branch!=='Malabon') dsets.push({label:'Manila',data:catMnl,backgroundColor:'#7f9dc4',borderRadius:4});
+  if(branch!=='Manila') dsets.push({label:'Malabon',data:catMbn,backgroundColor:'#c96b6b',borderRadius:4});
   setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{type:'bar',data:{labels:MONTH_NAMES,datasets:ds},options:stackedOpts});},30);
-
-  const bcard=sectionCard(host,'Branch comparison by category — '+plabel);
-  const cv2=document.createElement('canvas'); cv2.style.maxHeight='320px'; bcard.appendChild(cv2);
-  const catList = cats.length?cats:Object.keys(by);
-  const bmnl=catList.map(cat=>salesInPeriod('Manila',yr,mArr).filter(x=>(x.category||'OTHERS')===cat).reduce((a,b)=>a+b.amount,0));
-  const bmbn=catList.map(cat=>salesInPeriod('Malabon',yr,mArr).filter(x=>(x.category||'OTHERS')===cat).reduce((a,b)=>a+b.amount,0));
-  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv2._c)cv2._c.destroy();
-    cv2._c=new Chart(cv2,{type:'bar',data:{labels:catList,datasets:[
-      {label:'Manila',data:bmnl,backgroundColor:'#7f9dc4',borderRadius:4},
-      {label:'Malabon',data:bmbn,backgroundColor:'#c96b6b',borderRadius:4}]},options:barOpts()});},30);
+    cv._c=new Chart(cv,{type:'bar',data:{labels:MONTH_NAMES,datasets:dsets},options:barOpts()});},30);
+  // numbers at the bottom of the report
+  const nrows=[];
+  MI.forEach((m,i)=>{
+    const a=catMnl[i], b=catMbn[i], t=a+b;
+    if((branch==='Manila'&&a===0)||(branch==='Malabon'&&b===0)||(branch==='All'&&t===0)) return;
+    if(branch==='All') nrows.push([MONTH_NAMES[i], money(a), money(b), money(t)]);
+    else nrows.push([MONTH_NAMES[i], money(branch==='Manila'?a:b)]);
+  });
+  const totMnl=catMnl.reduce((x,y)=>x+y,0), totMbn=catMbn.reduce((x,y)=>x+y,0);
+  if(branch==='All'){
+    nrows.push(['TOTAL', money(totMnl), money(totMbn), money(totMnl+totMbn)]);
+    tableFrom(mcard, [`${selCat} — Month`,'Manila','Malabon','Total'], nrows);
+  } else {
+    nrows.push(['TOTAL', money(branch==='Manila'?totMnl:totMbn)]);
+    tableFrom(mcard, [`${selCat} — Month`, branch], nrows);
+  }
 }
 
 // ---- Sub-tab 3: Sales by Item (service breakdown + qty + detailed total) ----
 function renderItemReport(host){
-  salesReportFilterBar(host, {branch:true, period:true});
+  periodFilterBar(host, RKEYS, {branch:true});
   if(!state.sales.length){ reportEmpty(host); return; }
-  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
-  const mArr=periodMonths(period, state.reportMonth);
-  const plabel=periodLabelFor(period, state.reportMonth, yr);
+  const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
+  const yr=P.yr, branch=state.reportBranch, mArr=P.months, plabel=P.label;
   const sales=salesInPeriod(branch, yr, mArr);
   const by={}, qty={}; SERVICES_ORDER.forEach(s=>{by[s]=0;qty[s]=0;});
   sales.forEach(s=>{ const c=SERVICES_ORDER.includes(s.category)?s.category:'OTHERS'; by[c]=(by[c]||0)+s.amount; qty[c]=(qty[c]||0)+(s.qty||0); });
@@ -3228,11 +3364,11 @@ function renderItemReport(host){
 
 // ---- Sub-tab 4: Sales by Admin (from the Admin Sales Tracker xlsx) ----
 function renderAdminReport(host){
-  salesReportFilterBar(host, {branch:false, period:true});
-  const yr=Number(state.reportMonth.slice(0,4)), period=state.reportPeriod;
-  const perf=ADMIN_PERF_2026;
-  const mArr=periodMonths(period, state.reportMonth).filter(m=>perf.months.includes(m));
-  const plabel=periodLabelFor(period, state.reportMonth, yr);
+  periodFilterBar(host, RKEYS, {branch:false});
+  const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
+  const yr=P.yr; const perf=ADMIN_PERF_2026;
+  const mArr=P.months.filter(m=>perf.months.includes(m));
+  const plabel=P.label;
   if(yr!==perf.year || !mArr.length){
     const note=document.createElement('div'); note.className='notice';
     note.textContent='No admin performance data for this period. The Admin Sales Tracker covers Jan–Jun 2026 (July is hidden until the July POS report is uploaded).';
@@ -3271,6 +3407,27 @@ function renderAdminReport(host){
         {label:'Quota',data:[teamTarget],backgroundColor:'rgba(255,255,255,.15)',borderRadius:4}]},
       options:{...barOpts(), indexAxis:'y'}});},30);
   }
+  // --- Monthly sales performance per admin (instruction 7) ---
+  const mcard=sectionCard(host,'Monthly sales per admin');
+  const mnames=perf.months.map(m=>MONTH_NAMES[m-1]);
+  const adminNames=Object.keys(perf.admins).filter(n=>perf.admins[n].sales.some(v=>v>0));
+  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
+  const palette=chartPalette(adminNames.length);
+  const lineDs=adminNames.map((n,i)=>({label:n, data:perf.months.map((m,j)=>perf.admins[n].sales[j]),
+    borderColor:palette[i], backgroundColor:palette[i], borderWidth:2, tension:.25, pointRadius:2, fill:false}));
+  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+    cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:lineDs},options:barOpts()});},30);
+  // numbers table: Admin | each month | Total
+  const mrows=adminNames.map(n=>{
+    const vals=perf.months.map((m,j)=>perf.admins[n].sales[j]);
+    const tot=vals.reduce((a,b)=>a+b,0);
+    return [n, ...vals.map(v=>money(v)), money(tot)];
+  }).sort((a,b)=>parseFloat(b[b.length-1].replace(/,/g,''))-parseFloat(a[a.length-1].replace(/,/g,'')));
+  // monthly team totals row
+  const colTot=perf.months.map((m,j)=>adminNames.reduce((a,n)=>a+perf.admins[n].sales[j],0));
+  mrows.push(['Team', ...colTot.map(v=>money(v)), money(colTot.reduce((a,b)=>a+b,0))]);
+  tableFrom(mcard, ['Admin', ...mnames, 'Total'], mrows);
+
   const note=document.createElement('div'); note.className='notice';
   note.textContent='Sales by Admin is sourced from the Roshan Gym Admin Sales Tracker (per-admin monthly sales and quotas). Jan–Jun 2026; July hidden until the July POS report is uploaded.';
   host.appendChild(note);
@@ -3288,7 +3445,7 @@ function titleCard(host,title,total,subtitle){
 }
 function sectionCard(host,title){
   const c=document.createElement('div'); c.className='card';
-  if(title) c.innerHTML=`<h2 style="font-size:13px;color:var(--ink-1);margin-bottom:12px;">${escapeHtml(title)}</h2>`;
+  if(title) c.innerHTML=`<h2 style="font-size:13px;color:#ffffff;margin-bottom:12px;">${escapeHtml(title)}</h2>`;
   host.appendChild(c); return c;
 }
 function twoCol(host,leftFn,rightFn){
@@ -3304,8 +3461,8 @@ function pieCanvas(host,labels,data){
   const cv=document.createElement('canvas'); cv.style.maxHeight='280px'; host.appendChild(cv);
   const total=data.reduce((a,b)=>a+b,0)||1;
   setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{type:'doughnut',data:{labels,datasets:[{data,backgroundColor:chartPalette(labels.length),borderColor:'#0d0d0f',borderWidth:2}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:'#c9d1d9',font:{size:11},padding:8,
+    cv._c=new Chart(cv,{type:'doughnut',plugins:[pieLabelPlugin],data:{labels,datasets:[{data,backgroundColor:chartPalette(labels.length),borderColor:'#0d0d0f',borderWidth:2}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:'#ffffff',font:{size:11},padding:8,
         generateLabels:(ch)=>ch.data.labels.map((lab,i)=>({text:`${lab} ${(data[i]/total*100).toFixed(1)}%`,fillStyle:ch.data.datasets[0].backgroundColor[i],index:i}))}},
         tooltip:{callbacks:{label:(c)=>` ${fmtMoney(c.parsed)} (${(c.parsed/total*100).toFixed(1)}%)`}}}}});},30);
 }
@@ -3314,7 +3471,7 @@ function barhCanvas(host,labels,data){
   setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
     cv._c=new Chart(cv,{type:'bar',data:{labels,datasets:[{data,backgroundColor:chartPalette(labels.length),borderRadius:4}]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:(c)=>' '+fmtMoney(c.parsed.x)}}},
-        scales:{x:{ticks:{color:'#8b949e',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}},y:{type:'category',ticks:{color:'#c9d1d9',font:{size:12}},grid:{display:false}}}}});},30);
+        scales:{x:{ticks:{color:'#c9d1d9',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}},y:{type:'category',ticks:{color:'#ffffff',font:{size:12}},grid:{display:false}}}}});},30);
 }
 function breakdownTable(host,pairs,total){
   const t=document.createElement('table'); t.className='simple'; t.style.width='100%';
@@ -3343,9 +3500,9 @@ function tableFrom(host,headers,rows,goodFlags){
 }
 function barOpts(){
   return {responsive:true,maintainAspectRatio:false,
-    plugins:{legend:{labels:{color:'#c9d1d9',font:{size:11}}},tooltip:{callbacks:{label:(c)=>` ${c.dataset.label}: ${fmtMoney(c.parsed.y)}`}}},
-    scales:{x:{ticks:{color:'#8b949e',font:{size:10}},grid:{color:'rgba(255,255,255,.05)'}},
-      y:{ticks:{color:'#8b949e',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}}}};
+    plugins:{legend:{labels:{color:'#ffffff',font:{size:11}}},tooltip:{callbacks:{label:(c)=>` ${c.dataset.label}: ${fmtMoney(c.parsed.y)}`}}},
+    scales:{x:{ticks:{color:'#c9d1d9',font:{size:10}},grid:{color:'rgba(255,255,255,.05)'}},
+      y:{ticks:{color:'#c9d1d9',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}}}};
 }
 
 // ---------- MANAGE IMPORTS (batch cleanup) ----------
