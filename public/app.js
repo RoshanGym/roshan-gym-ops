@@ -2132,6 +2132,11 @@ function renderSales(el){
     b.onclick = ()=>{ state.salesTab = t.k; render(); };
     tabs.appendChild(b);
   });
+  const xbtn=document.createElement('button');
+  xbtn.className='btn'; xbtn.textContent='⬇ Export to Excel';
+  xbtn.style.marginLeft='auto';
+  xbtn.onclick=()=>exportDashboardsToExcel(xbtn);
+  tabs.appendChild(xbtn);
   el.appendChild(tabs);
 
   const body = document.createElement('div');
@@ -2659,20 +2664,20 @@ function renderMerchReport(el){
 const SERVICES_ORDER = ['GYM','HIIT','Personal Training','Martial Arts','OTHERS'];
 const QUARTERS = {1:'Q1',2:'Q1',3:'Q1',4:'Q2',5:'Q2',6:'Q2',7:'Q3',8:'Q3',9:'Q3',10:'Q4',11:'Q4',12:'Q4'};
 
-// Per-admin monthly figures from the Admin Sales Tracker xlsx (SALES COMMISSION SUMMARY 2026).
-// Sales by Admin reads this directly (not the POS/admin-tracker sales rows).
-// Months are Jan..Jun 2026 only — July is hidden until the July POS report is uploaded.
+// Per-admin monthly figures. Jan–Jun from the Admin Sales Tracker xlsx; July from the
+// uploaded July POS files (core services + Keyfob/access card as OTHERS). Ela's July is the
+// Manila All-Staff total minus Andre+Mica+Emman. Francis had no July file in the folder.
 const ADMIN_PERF_2026 = {
   year: 2026,
-  months: [1,2,3,4,5,6],
+  months: [1,2,3,4,5,6,7],
   admins: {
-    'Andre':   { branch:'Manila',  sales: [510726, 408059, 392215, 608596, 491463, 495741], target: [425000, 425000, 425000, 500000, 425000, 425000] },
-    'Mica':    { branch:'Manila',  sales: [321623, 286770, 529497, 511746, 245313, 340170], target: [425000, 425000, 425000, 500000, 425000, 425000] },
-    'Loraine': { branch:'Malabon', sales: [297010, 285923, 240550, 365530, 294747, 441708], target: [325000, 325000, 325000, 400000, 325000, 375000] },
-    'Kloe':    { branch:'Malabon', sales: [361883, 247940, 410304, 448116, 256751,  69000], target: [325000, 325000, 325000, 400000, 325000, 275000] },
-    'Francis': { branch:'Malabon', sales: [0, 0, 0, 0, 0, 43849], target: [0, 0, 0, 0, 0, 100000] },
-    'Ela':     { branch:'Manila',  sales: [0, 58970, 31890, 22360, 43367, 22670], target: [0, 0, 0, 0, 0, 0] },
-    'Emman':   { branch:'Manila',  sales: [0, 0, 0, 0, 0, 0], target: [0, 0, 0, 0, 0, 0] },
+    'Andre':   { branch:'Manila',  sales: [510726, 408059, 392215, 608596, 491463, 495741, 483011], target: [425000, 425000, 425000, 500000, 425000, 425000, 425000] },
+    'Mica':    { branch:'Manila',  sales: [321623, 286770, 529497, 511746, 245313, 340170, 103237], target: [425000, 425000, 425000, 500000, 425000, 425000, 212500] },
+    'Loraine': { branch:'Malabon', sales: [297010, 285923, 240550, 365530, 294747, 441708, 394564], target: [325000, 325000, 325000, 400000, 325000, 375000, 375000] },
+    'Kloe':    { branch:'Malabon', sales: [361883, 247940, 410304, 448116, 256751,  69000, 219620], target: [325000, 325000, 325000, 400000, 325000, 275000,      0] },
+    'Francis': { branch:'Malabon', sales: [0, 0, 0, 0, 0, 43849, 0], target: [0, 0, 0, 0, 0, 100000, 0] },
+    'Ela':     { branch:'Manila',  sales: [0, 58970, 31890, 22360, 43367, 22670, 34377], target: [0, 0, 0, 0, 0, 0, 0] },
+    'Emman':   { branch:'Manila',  sales: [0, 0, 0, 0, 0, 0, 189850], target: [0, 0, 0, 0, 0, 0, 212500] },
   }
 };
 
@@ -3008,8 +3013,8 @@ function ensureReportMonth(){
   if(state.reportMonth) return;
   let latest=null;
   state.sales.forEach(s=>{ if(!isPosSale(s)||!isCoreSale(s))return; const ym=s.date.slice(0,7);
-    if(ym.slice(5,7)==='07')return; if(!latest||ym>latest)latest=ym; });
-  state.reportMonth = latest || '2026-06';
+    if(!latest||ym>latest)latest=ym; });
+  state.reportMonth = latest || '2026-07';
 }
 function periodMonths(period, ym){
   const m=Number(ym.slice(5,7));
@@ -3414,7 +3419,7 @@ function renderAdminReport(host){
   const plabel=P.label;
   if(yr!==perf.year || !mArr.length){
     const note=document.createElement('div'); note.className='notice';
-    note.textContent='No admin performance data for this period. The Admin Sales Tracker covers Jan–Jun 2026 (July is hidden until the July POS report is uploaded).';
+    note.textContent='No admin performance data for this period. The Admin Sales Tracker covers Jan–Jul 2026.';
     host.appendChild(note); return;
   }
   const idx=m=>perf.months.indexOf(m);
@@ -3451,32 +3456,144 @@ function renderAdminReport(host){
         {label:'Quota',data:[teamTarget],backgroundColor:'rgba(255,255,255,.15)',borderRadius:4}]},
       options:{...barOpts(), indexAxis:'y'}});},30);
   }
-  // --- Monthly sales performance per admin (instruction 7) ---
+  // --- Monthly sales performance per admin (+ per-admin sales vs target) ---
   const mcard=sectionCard(host,'Monthly sales per admin');
   const mnames=perf.months.map(m=>MONTH_NAMES[m-1]);
   const adminNames=Object.keys(perf.admins).filter(n=>adminIn(n) && perf.admins[n].sales.some(v=>v>0));
+  if(!state.adminLinePick || (state.adminLinePick!=='All' && !adminNames.includes(state.adminLinePick))) state.adminLinePick='All';
+  const pick=state.adminLinePick;
+  const sel=document.createElement('select'); sel.style.marginBottom='12px';
+  sel.innerHTML=['All',...adminNames].map(n=>`<option value="${escapeHtml(n)}" ${n===pick?'selected':''}>${n==='All'?'All admins':escapeHtml(n)+' — sales vs target'}</option>`).join('');
+  sel.onchange=()=>{ state.adminLinePick=sel.value; render(); };
+  mcard.appendChild(sel);
   const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
-  const palette=chartPalette(adminNames.length);
-  const lineDs=adminNames.map((n,i)=>({label:n, data:perf.months.map((m,j)=>perf.admins[n].sales[j]),
-    borderColor:palette[i], backgroundColor:palette[i], borderWidth:2, tension:.25, pointRadius:2, fill:false}));
-  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:lineDs},options:barOpts()});},30);
-  // numbers table: Admin | each month | Total
+  if(pick==='All'){
+    const palette=chartPalette(adminNames.length);
+    const lineDs=adminNames.map((n,i)=>({label:n, data:perf.months.map((m,j)=>perf.admins[n].sales[j]),
+      borderColor:palette[i], backgroundColor:palette[i], borderWidth:2, tension:.25, pointRadius:2, fill:false}));
+    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+      cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:lineDs},options:barOpts()});},30);
+  } else {
+    const d=perf.admins[pick];
+    const sData=perf.months.map((m,j)=>d.sales[j]);
+    const tData=perf.months.map((m,j)=>d.target[j]);
+    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+      cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:[
+        {label:pick+' sales', data:sData, borderColor:'#7fae82', backgroundColor:'#7fae82', borderWidth:2, tension:.25, pointRadius:3, fill:false},
+        {label:'Target', data:tData, borderColor:'#d1a56b', borderWidth:2, borderDash:[5,4], pointRadius:0, tension:.2, fill:false}
+      ]},options:barOpts()});},30);
+    const sTot=sData.reduce((a,b)=>a+b,0), tTot=tData.reduce((a,b)=>a+b,0);
+    const info=document.createElement('div'); info.className='notice';
+    info.innerHTML=`<strong>${escapeHtml(pick)}</strong> (${d.branch}) — sales ${fmtMoney(sTot)} vs quota ${fmtMoney(tTot)}${tTot?` · ${(sTot/tTot*100).toFixed(0)}% attainment`:' · no quota set'}.`;
+    mcard.appendChild(info);
+  }
+  // numbers table: Admin | each month | Total (always the full team)
   const mrows=adminNames.map(n=>{
     const vals=perf.months.map((m,j)=>perf.admins[n].sales[j]);
     const tot=vals.reduce((a,b)=>a+b,0);
     return [n, ...vals.map(v=>money(v)), money(tot)];
   }).sort((a,b)=>parseFloat(b[b.length-1].replace(/,/g,''))-parseFloat(a[a.length-1].replace(/,/g,'')));
-  // monthly team totals row
   const colTot=perf.months.map((m,j)=>adminNames.reduce((a,n)=>a+perf.admins[n].sales[j],0));
   mrows.push(['Team', ...colTot.map(v=>money(v)), money(colTot.reduce((a,b)=>a+b,0))]);
   tableFrom(mcard, ['Admin', ...mnames, 'Total'], mrows);
 
   const note=document.createElement('div'); note.className='notice';
-  note.textContent='Sales by Admin is sourced from the Roshan Gym Admin Sales Tracker (per-admin monthly sales and quotas). Branch reflects each admin\u2019s home branch. Jan–Jun 2026; July hidden until the July POS report is uploaded.';
+  note.textContent='Sales by Admin: Jan–Jun from the Admin Sales Tracker xlsx, July from the uploaded July POS files (Ela = Manila All minus Andre+Mica+Emman). Branch reflects each admin\u2019s home branch. Francis had no July file.';
   host.appendChild(note);
 }
 // =================== end Sales Dashboard sub-tab reports ===================
+
+// ---- Export all dashboards (data + charts) to a single .xlsx (instruction: backup) ----
+function loadScriptOnce(src){
+  return new Promise((res,rej)=>{
+    if([...document.scripts].some(s=>s.src===src)) return res();
+    const el=document.createElement('script'); el.src=src;
+    el.onload=()=>res(); el.onerror=()=>rej(new Error('Could not load '+src));
+    document.head.appendChild(el);
+  });
+}
+async function exportDashboardsToExcel(btn){
+  const orig = btn ? btn.textContent : '';
+  if(btn){ btn.disabled=true; btn.textContent='Preparing…'; }
+  try{
+    await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js');
+    const ExcelJS = window.ExcelJS;
+    if(!ExcelJS) throw new Error('ExcelJS unavailable');
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Roshan Gym Ops'; wb.created = new Date();
+
+    // Snapshot filters, then render each dashboard at a full backup scope (All / YTD).
+    const snap = { rb:state.reportBranch, rp:state.reportPeriod, sb:state.salesBranch, sp:state.salesPeriod, alp:state.adminLinePick };
+    state.reportBranch='All'; state.reportPeriod='ytd';
+    state.salesBranch='All'; state.salesPeriod='ytd'; state.adminLinePick='All';
+
+    const reports = [
+      ['Overview', renderSalesOverview],
+      ['Performance per Branch', renderBranchPerf],
+      ['Sales by Category', renderCategoryReport],
+      ['Sales by Item', renderItemReport],
+      ['Sales by Admin', renderAdminReport],
+    ];
+    const holder=document.createElement('div');
+    holder.style.cssText='position:fixed;left:-99999px;top:0;width:920px;';
+    document.body.appendChild(holder);
+
+    for(const [name, fn] of reports){
+      const box=document.createElement('div'); box.style.width='900px'; holder.appendChild(box);
+      try{ fn(box); }catch(e){ /* keep going */ }
+      await new Promise(r=>setTimeout(r, 550)); // let Chart.js finish drawing
+      const ws=wb.addWorksheet(name.slice(0,31));
+      ws.columns=[{width:34},{width:16},{width:16},{width:16},{width:16},{width:16},{width:16},{width:16}];
+      let row=1;
+      const title=ws.getCell('A'+row); title.value=name; title.font={bold:true,size:14}; row+=2;
+      // section headers + tables
+      box.querySelectorAll('.card').forEach(card=>{
+        const h=card.querySelector('h2'); 
+        if(h){ const c=ws.getCell('A'+row); c.value=h.textContent.trim(); c.font={bold:true,size:11}; row++; }
+        card.querySelectorAll('table').forEach(tbl=>{
+          tbl.querySelectorAll('tr').forEach(tr=>{
+            const cells=[...tr.querySelectorAll('th,td')].map(td=>{
+              const t=td.textContent.trim();
+              const num=t.replace(/,/g,'').replace(/%$/,'');
+              return (t!=='' && /^-?\d+(\.\d+)?$/.test(num)) ? Number(num) : t;
+            });
+            const r=ws.addRow(cells);
+            if(tr.querySelector('th')) r.font={bold:true};
+            row++;
+          });
+          ws.addRow([]); row++;
+        });
+      });
+      // charts as images
+      const canvases=[...box.querySelectorAll('canvas')];
+      for(const cv of canvases){
+        let dataUrl=null; try{ dataUrl=cv.toDataURL('image/png'); }catch(e){}
+        if(!dataUrl || dataUrl.length<200) continue;
+        const imgId=wb.addImage({ base64:dataUrl, extension:'png' });
+        const w=Math.min(cv.width||700,700), h=Math.min(cv.height||300,320);
+        ws.addImage(imgId, { tl:{col:0.2, row:row}, ext:{width:w, height:h} });
+        row += Math.ceil(h/18)+2;
+      }
+      holder.removeChild(box);
+    }
+    document.body.removeChild(holder);
+    Object.assign(state, {reportBranch:snap.rb, reportPeriod:snap.rp, salesBranch:snap.sb, salesPeriod:snap.sp, adminLinePick:snap.alp});
+
+    const buf=await wb.xlsx.writeBuffer();
+    const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download=`Roshan_Sales_Dashboard_${new Date().toISOString().slice(0,10)}.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+    if(btn) btn.textContent='✓ Exported';
+  }catch(err){
+    console.error('Excel export failed:', err);
+    alert('Export failed: '+err.message+'\nIf this persists, the CDN for the Excel library may be blocked by your network.');
+    if(btn) btn.textContent=orig||'⬇ Export to Excel';
+  }finally{
+    if(btn){ btn.disabled=false; setTimeout(()=>{ if(btn.textContent==='✓ Exported') btn.textContent=orig||'⬇ Export to Excel'; }, 2500); render(); }
+  }
+}
 
 function monthLabel(ym){ const [y,m]=ym.split('-'); return `${MONTH_NAMES[Number(m)-1]} ${y}`; }
 function titleCard(host,title,total,subtitle){
