@@ -2674,12 +2674,35 @@ const ADMIN_PERF_2026 = {
     'Andre':   { branch:'Manila',  sales: [510726, 408059, 392215, 608596, 491463, 495741, 483011], target: [425000, 425000, 425000, 500000, 425000, 425000, 425000] },
     'Mica':    { branch:'Manila',  sales: [321623, 286770, 529497, 511746, 245313, 340170, 103237], target: [425000, 425000, 425000, 500000, 425000, 425000, 212500] },
     'Loraine': { branch:'Malabon', sales: [297010, 285923, 240550, 365530, 294747, 441708, 394564], target: [325000, 325000, 325000, 400000, 325000, 375000, 375000] },
-    'Kloe':    { branch:'Malabon', sales: [361883, 247940, 410304, 448116, 256751,  69000, 219620], target: [325000, 325000, 325000, 400000, 325000, 275000,      0] },
+    'Kloe':    { branch:'Malabon', sales: [361883, 247940, 410304, 448116, 256751,  69000, 219620], target: [325000, 325000, 325000, 400000, 325000, 275000, 375000] },
     'Francis': { branch:'Malabon', sales: [0, 0, 0, 0, 0, 43849, 0], target: [0, 0, 0, 0, 0, 100000, 0] },
     'Ela':     { branch:'Manila',  sales: [0, 58970, 31890, 22360, 43367, 22670, 34377], target: [0, 0, 0, 0, 0, 0, 0] },
     'Emman':   { branch:'Manila',  sales: [0, 0, 0, 0, 0, 0, 189850], target: [0, 0, 0, 0, 0, 0, 212500] },
   }
 };
+
+// Editable per-admin monthly quotas. Manual edits are layered over the tracker defaults
+// above and saved in this browser (localStorage). Swap load/save for an API later to share.
+const ADMIN_QUOTA_LS_KEY = 'roshan.adminQuota.2026';
+function loadAdminQuotaOverrides(){
+  if(state.adminQuotaOverrides) return state.adminQuotaOverrides;
+  let o={};
+  try{ if(typeof localStorage!=='undefined'){ const raw=localStorage.getItem(ADMIN_QUOTA_LS_KEY); if(raw) o=JSON.parse(raw)||{}; } }catch(e){ o={}; }
+  state.adminQuotaOverrides=o; return o;
+}
+function saveAdminQuotaOverride(name, monthNum, value){
+  const o=loadAdminQuotaOverrides(); const key=name+':'+monthNum;
+  if(value===null||value===undefined||value===''){ delete o[key]; }
+  else o[key]=Number(value)||0;
+  try{ if(typeof localStorage!=='undefined') localStorage.setItem(ADMIN_QUOTA_LS_KEY, JSON.stringify(o)); }catch(e){}
+}
+function adminTargetFor(name, monthNum){
+  const o=loadAdminQuotaOverrides(); const key=name+':'+monthNum;
+  if(Object.prototype.hasOwnProperty.call(o,key)) return Number(o[key])||0;
+  const d=ADMIN_PERF_2026.admins[name]; if(!d) return 0;
+  const idx=ADMIN_PERF_2026.months.indexOf(monthNum);
+  return idx>=0 ? (Number(d.target[idx])||0) : 0;
+}
 
 function renderSalesReports(el){
   if(!state.reportWhich) state.reportWhich = 'category';
@@ -3425,7 +3448,7 @@ function renderAdminReport(host){
   const idx=m=>perf.months.indexOf(m);
   const rows=Object.entries(perf.admins).filter(([name])=>adminIn(name)).map(([name,d])=>{
     const sales=mArr.reduce((a,m)=>a+d.sales[idx(m)],0);
-    const target=mArr.reduce((a,m)=>a+d.target[idx(m)],0);
+    const target=mArr.reduce((a,m)=>a+adminTargetFor(name,m),0);
     return {name, sales, target};
   }).filter(r=>r.sales>0 || r.target>0).sort((a,b)=>b.sales-a.sales);
   const teamSales=rows.reduce((a,b)=>a+b.sales,0), teamTarget=rows.reduce((a,b)=>a+b.target,0);
@@ -3476,7 +3499,7 @@ function renderAdminReport(host){
   } else {
     const d=perf.admins[pick];
     const sData=perf.months.map((m,j)=>d.sales[j]);
-    const tData=perf.months.map((m,j)=>d.target[j]);
+    const tData=perf.months.map((m)=>adminTargetFor(pick,m));
     setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
       cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:[
         {label:pick+' sales', data:sData, borderColor:'#7fae82', backgroundColor:'#7fae82', borderWidth:2, tension:.25, pointRadius:3, fill:false},
@@ -3496,6 +3519,32 @@ function renderAdminReport(host){
   const colTot=perf.months.map((m,j)=>adminNames.reduce((a,n)=>a+perf.admins[n].sales[j],0));
   mrows.push(['Team', ...colTot.map(v=>money(v)), money(colTot.reduce((a,b)=>a+b,0))]);
   tableFrom(mcard, ['Admin', ...mnames, 'Total'], mrows);
+
+  // --- Editable quotas: assign a monthly quota per admin (saved in this browser) ---
+  const qcard=sectionCard(host,'Set monthly quota per admin');
+  const qhint=document.createElement('div'); qhint.className='hint'; qhint.style.marginBottom='10px';
+  qhint.textContent='Type a quota for any admin and month. Saved in this browser and applied to the attainment figures above. Leave blank to fall back to the tracker default.';
+  qcard.appendChild(qhint);
+  const qtbl=document.createElement('table'); qtbl.className='simple'; qtbl.style.width='100%';
+  qtbl.innerHTML='<thead><tr><th>Admin</th>'+perf.months.map(m=>`<th style="text-align:right">${MONTH_NAMES[m-1]}</th>`).join('')+'</tr></thead>';
+  const qtb=document.createElement('tbody');
+  Object.keys(perf.admins).filter(n=>adminIn(n)).forEach(name=>{
+    const tr=document.createElement('tr');
+    const nameTd=document.createElement('td'); nameTd.textContent=name; tr.appendChild(nameTd);
+    perf.months.forEach(m=>{
+      const td=document.createElement('td'); td.style.textAlign='right';
+      const inp=document.createElement('input'); inp.type='number'; inp.min='0'; inp.step='5000';
+      inp.value=adminTargetFor(name,m)||'';
+      inp.style.cssText='width:88px;text-align:right;background:transparent;border:1px solid var(--line);border-radius:4px;color:#ffffff;padding:3px 5px;';
+      inp.onchange=()=>{ saveAdminQuotaOverride(name, m, inp.value===''?null:inp.value); render(); };
+      td.appendChild(inp); tr.appendChild(td);
+    });
+    qtb.appendChild(tr);
+  });
+  qtbl.appendChild(qtb); qcard.appendChild(qtbl);
+  const rstBtn=document.createElement('button'); rstBtn.className='btn'; rstBtn.textContent='Reset to tracker defaults'; rstBtn.style.marginTop='10px';
+  rstBtn.onclick=()=>{ if(typeof confirm==='undefined' || confirm('Clear all manual quota edits saved in this browser?')){ try{ if(typeof localStorage!=='undefined') localStorage.removeItem(ADMIN_QUOTA_LS_KEY); }catch(e){} state.adminQuotaOverrides=null; render(); } };
+  qcard.appendChild(rstBtn);
 
   const note=document.createElement('div'); note.className='notice';
   note.textContent='Sales by Admin: Jan–Jun from the Admin Sales Tracker xlsx, July from the uploaded July POS files (Ela = Manila All minus Andre+Mica+Emman). Branch reflects each admin\u2019s home branch. Francis had no July file.';
