@@ -2206,6 +2206,8 @@ function renderSalesOverview(el){
 
   // Actual vs Target numbers per month (replaces Sales-per-admin) — instruction 2
   monthlyActualVsTargetTable(el, yr, branch, 12);
+  // Actual vs Target per quarter, side by side
+  quarterlyActualVsTarget(el, yr, branch);
   // Summary & recommendations — instruction 4
   renderPerfNarrative(el, yr, branch, 12);
 }
@@ -2219,6 +2221,20 @@ function chartPalette(n){
   const base = ['#c96b6b','#d1a56b','#7fae82','#7f9dc4','#a892c4','#c48fa8','#6faeb2','#c4b07f','#8fbf9a','#b89ca8'];
   const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
 }
+
+// Force chart text to be light on the dark theme, across Chart.js versions.
+// v3/v4 read Chart.defaults.color; v2 reads Chart.defaults.global.defaultFontColor.
+function applyChartTextDefaults(){
+  if(typeof Chart==='undefined' || !Chart.defaults) return;
+  try{
+    Chart.defaults.color = '#ffffff';
+    if(Chart.defaults.plugins && Chart.defaults.plugins.legend && Chart.defaults.plugins.legend.labels)
+      Chart.defaults.plugins.legend.labels.color = '#ffffff';
+    if(Chart.defaults.global){ Chart.defaults.global.defaultFontColor = '#ffffff'; }
+  }catch(e){}
+}
+applyChartTextDefaults();
+if(typeof window!=='undefined') window.addEventListener('load', applyChartTextDefaults);
 
 // Inline plugin: draw the % share directly on each pie/doughnut slice (white),
 // so users don't have to hover. Self-contained — no external plugin needed.
@@ -2293,6 +2309,7 @@ function drawCategoryChart(canvas, sales){
                 text: `${lab}  ${(d[i]/total*100).toFixed(1)}%`,
                 fillStyle: chart.data.datasets[0].backgroundColor[i],
                 strokeStyle: chart.data.datasets[0].backgroundColor[i],
+                fontColor: '#ffffff',
                 index:i
               }));
             }
@@ -2649,13 +2666,13 @@ const ADMIN_PERF_2026 = {
   year: 2026,
   months: [1,2,3,4,5,6],
   admins: {
-    'Andre':   { sales: [510726, 408059, 392215, 608596, 491463, 495741], target: [425000, 425000, 425000, 500000, 425000, 425000] },
-    'Mica':    { sales: [321623, 286770, 529497, 511746, 245313, 340170], target: [425000, 425000, 425000, 500000, 425000, 425000] },
-    'Loraine': { sales: [297010, 285923, 240550, 365530, 294747, 441708], target: [325000, 325000, 325000, 400000, 325000, 375000] },
-    'Kloe':    { sales: [361883, 247940, 410304, 448116, 256751,  69000], target: [325000, 325000, 325000, 400000, 325000, 275000] },
-    'Francis': { sales: [0, 0, 0, 0, 0, 43849], target: [0, 0, 0, 0, 0, 100000] },
-    'Ela':     { sales: [0, 58970, 31890, 22360, 43367, 22670], target: [0, 0, 0, 0, 0, 0] },
-    'Emman':   { sales: [0, 0, 0, 0, 0, 0], target: [0, 0, 0, 0, 0, 0] },
+    'Andre':   { branch:'Manila',  sales: [510726, 408059, 392215, 608596, 491463, 495741], target: [425000, 425000, 425000, 500000, 425000, 425000] },
+    'Mica':    { branch:'Manila',  sales: [321623, 286770, 529497, 511746, 245313, 340170], target: [425000, 425000, 425000, 500000, 425000, 425000] },
+    'Loraine': { branch:'Malabon', sales: [297010, 285923, 240550, 365530, 294747, 441708], target: [325000, 325000, 325000, 400000, 325000, 375000] },
+    'Kloe':    { branch:'Malabon', sales: [361883, 247940, 410304, 448116, 256751,  69000], target: [325000, 325000, 325000, 400000, 325000, 275000] },
+    'Francis': { branch:'Malabon', sales: [0, 0, 0, 0, 0, 43849], target: [0, 0, 0, 0, 0, 100000] },
+    'Ela':     { branch:'Manila',  sales: [0, 58970, 31890, 22360, 43367, 22670], target: [0, 0, 0, 0, 0, 0] },
+    'Emman':   { branch:'Manila',  sales: [0, 0, 0, 0, 0, 0], target: [0, 0, 0, 0, 0, 0] },
   }
 };
 
@@ -3139,6 +3156,31 @@ function monthlyActualVsTargetTable(host, yr, branch, endM){
   return {totA, totMin};
 }
 
+// Actual vs Target per quarter, side by side (instruction: overview).
+// Quarters with no loaded sales are skipped (2026 still in progress).
+function quarterlyActualVsTarget(host, yr, branch){
+  const quarters=[{q:'Q1',months:[1,2,3]},{q:'Q2',months:[4,5,6]},{q:'Q3',months:[7,8,9]},{q:'Q4',months:[10,11,12]}];
+  const rows=quarters.map(qq=>{
+    const actual=salesInPeriod(branch,yr,qq.months).reduce((a,b)=>a+b.amount,0);
+    const t=targetFor(yr,branch,qq.months);
+    return {q:qq.q, actual, min:t.min, med:t.med, max:t.max};
+  }).filter(r=>r.actual>0);
+  if(!rows.length) return;
+  const card=sectionCard(host, `Actual vs Target by quarter${branch!=='All'?' · '+branch:''}`);
+  const cv=document.createElement('canvas'); cv.style.maxHeight='300px'; card.appendChild(cv);
+  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+    cv._c=new Chart(cv,{type:'bar',data:{labels:rows.map(r=>r.q),datasets:[
+      {label:'Actual',data:rows.map(r=>r.actual),backgroundColor:rows.map(r=>r.min&&r.actual>=r.min?'#7fae82':'#c96b6b'),borderRadius:4},
+      {label:'Min target',data:rows.map(r=>r.min),backgroundColor:'#d1a56b',borderRadius:4}
+    ]},options:barOpts()});},30);
+  tableFrom(card, ['Quarter','Actual','Min target','Over/Under','Attainment'],
+    rows.map(r=>{ const d=r.actual-r.min; return [r.q, money(r.actual), money(r.min), (d>=0?'+':'')+money(Math.abs(d)), r.min?(r.actual/r.min*100).toFixed(0)+'%':'—']; }),
+    rows.map(r=>r.min?r.actual>=r.min:true));
+  const only=document.createElement('div'); only.className='hint'; only.style.marginTop='6px';
+  only.textContent='Only quarters with loaded sales are shown — 2026 is still in progress.';
+  card.appendChild(only);
+}
+
 // Data-driven performance summary + improvement steps (instruction 4).
 function renderPerfNarrative(host, yr, branch, endM){
   endM = endM || 12;
@@ -3364,9 +3406,10 @@ function renderItemReport(host){
 
 // ---- Sub-tab 4: Sales by Admin (from the Admin Sales Tracker xlsx) ----
 function renderAdminReport(host){
-  periodFilterBar(host, RKEYS, {branch:false});
+  periodFilterBar(host, RKEYS, {branch:true});
   const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
-  const yr=P.yr; const perf=ADMIN_PERF_2026;
+  const yr=P.yr; const perf=ADMIN_PERF_2026; const branch=state.reportBranch||'All';
+  const adminIn=(name)=> branch==='All' || (perf.admins[name] && perf.admins[name].branch===branch);
   const mArr=P.months.filter(m=>perf.months.includes(m));
   const plabel=P.label;
   if(yr!==perf.year || !mArr.length){
@@ -3375,13 +3418,14 @@ function renderAdminReport(host){
     host.appendChild(note); return;
   }
   const idx=m=>perf.months.indexOf(m);
-  const rows=Object.entries(perf.admins).map(([name,d])=>{
+  const rows=Object.entries(perf.admins).filter(([name])=>adminIn(name)).map(([name,d])=>{
     const sales=mArr.reduce((a,m)=>a+d.sales[idx(m)],0);
     const target=mArr.reduce((a,m)=>a+d.target[idx(m)],0);
     return {name, sales, target};
   }).filter(r=>r.sales>0 || r.target>0).sort((a,b)=>b.sales-a.sales);
   const teamSales=rows.reduce((a,b)=>a+b.sales,0), teamTarget=rows.reduce((a,b)=>a+b.target,0);
-  titleCard(host, `Sales by Admin — ${plabel}`, teamSales,
+  if(!rows.length){ const n=document.createElement('div'); n.className='notice'; n.textContent='No admin data for this branch and period.'; host.appendChild(n); return; }
+  titleCard(host, `Sales by Admin — ${plabel}${branch!=='All'?' · '+branch:''}`, teamSales,
     teamTarget?`team at ${(teamSales/teamTarget*100).toFixed(1)}% of quota (${fmtMoney(teamTarget)})`:'');
 
   twoCol(host,
@@ -3410,7 +3454,7 @@ function renderAdminReport(host){
   // --- Monthly sales performance per admin (instruction 7) ---
   const mcard=sectionCard(host,'Monthly sales per admin');
   const mnames=perf.months.map(m=>MONTH_NAMES[m-1]);
-  const adminNames=Object.keys(perf.admins).filter(n=>perf.admins[n].sales.some(v=>v>0));
+  const adminNames=Object.keys(perf.admins).filter(n=>adminIn(n) && perf.admins[n].sales.some(v=>v>0));
   const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
   const palette=chartPalette(adminNames.length);
   const lineDs=adminNames.map((n,i)=>({label:n, data:perf.months.map((m,j)=>perf.admins[n].sales[j]),
@@ -3429,7 +3473,7 @@ function renderAdminReport(host){
   tableFrom(mcard, ['Admin', ...mnames, 'Total'], mrows);
 
   const note=document.createElement('div'); note.className='notice';
-  note.textContent='Sales by Admin is sourced from the Roshan Gym Admin Sales Tracker (per-admin monthly sales and quotas). Jan–Jun 2026; July hidden until the July POS report is uploaded.';
+  note.textContent='Sales by Admin is sourced from the Roshan Gym Admin Sales Tracker (per-admin monthly sales and quotas). Branch reflects each admin\u2019s home branch. Jan–Jun 2026; July hidden until the July POS report is uploaded.';
   host.appendChild(note);
 }
 // =================== end Sales Dashboard sub-tab reports ===================
@@ -3463,7 +3507,7 @@ function pieCanvas(host,labels,data){
   setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
     cv._c=new Chart(cv,{type:'doughnut',plugins:[pieLabelPlugin],data:{labels,datasets:[{data,backgroundColor:chartPalette(labels.length),borderColor:'#0d0d0f',borderWidth:2}]},
       options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:'#ffffff',font:{size:11},padding:8,
-        generateLabels:(ch)=>ch.data.labels.map((lab,i)=>({text:`${lab} ${(data[i]/total*100).toFixed(1)}%`,fillStyle:ch.data.datasets[0].backgroundColor[i],index:i}))}},
+        generateLabels:(ch)=>ch.data.labels.map((lab,i)=>({text:`${lab} ${(data[i]/total*100).toFixed(1)}%`,fillStyle:ch.data.datasets[0].backgroundColor[i],fontColor:'#ffffff',index:i}))}},
         tooltip:{callbacks:{label:(c)=>` ${fmtMoney(c.parsed)} (${(c.parsed/total*100).toFixed(1)}%)`}}}}});},30);
 }
 function barhCanvas(host,labels,data){
