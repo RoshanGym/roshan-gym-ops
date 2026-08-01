@@ -1,10 +1,9 @@
-
 const SECTIONS = [
   {key:'tasks', label:'Daily tasks', sub:'Daily & weekly checklists, proof, and completion tracking.'},
   {key:'po', label:'Purchase orders', sub:'Order merchandise and supplies, tracked end to end.'},
   {key:'pettycash', label:'Petty cash', sub:'Reimbursements for staff, tracked end to end.'},
   {key:'potracker', label:'PO tracker', sub:'PO, check payment, and delivery receipt matched automatically.'},
-  {key:'sales', label:'Sales tracker', sub:'Daily revenue by category and payment method.'},
+  {key:'sales', label:'Sales Dashboard', sub:'Revenue reports, targets, and admin performance.'},
   {key:'membership', label:'Membership tracker', sub:'Active, expiring, and expired memberships.'},
   {key:'repository', label:'Repository', sub:'Every PO, check, and receipt in one place.'},
 ];
@@ -295,6 +294,8 @@ function renderNav(){
   const el = document.getElementById('nav-admin');
   el.innerHTML = '';
   SECTIONS.forEach(s=>{
+    // Sales Dashboard is Super Admin only.
+    if(s.key==='sales' && tier!=='SuperAdmin') return;
     const b = document.createElement('button');
     b.className = 'nav-item' + (state.section===s.key ? ' active':'');
     b.innerHTML = '<span class="nav-dot"></span>' + s.label;
@@ -400,7 +401,10 @@ function renderContent(){
   if(state.section==='po') return renderRequestsSection(el, 'PO');
   if(state.section==='pettycash') return renderRequestsSection(el, 'PettyCash');
   if(state.section==='potracker') return renderPoTracker(el);
-  if(state.section==='sales') return renderSales(el);
+  if(state.section==='sales'){
+    if(accessTier(curRole())!=='SuperAdmin'){ el.innerHTML='<div class="empty">The Sales Dashboard is available to Super Admins only.</div>'; return; }
+    return renderSales(el);
+  }
   if(state.section==='membership') return renderMembership(el);
   if(state.section==='repository') return renderRepository(el);
 }
@@ -2113,7 +2117,10 @@ function renderSales(el){
   const tabs = document.createElement('div'); tabs.className='toolbar'; tabs.style.marginBottom='18px';
   const tabDefs = [
     {k:'overview', l:'Overview'},
-    {k:'reports', l:'Reports'},
+    {k:'branchperf', l:'Performance per Branch'},
+    {k:'category', l:'Sales by Category'},
+    {k:'item', l:'Sales by Item'},
+    {k:'admin', l:'Sales by Admin'},
     {k:'upload', l:'Upload POS report'},
     {k:'entries', l:'Entries'},
   ];
@@ -2129,9 +2136,13 @@ function renderSales(el){
 
   const body = document.createElement('div');
   el.appendChild(body);
+  ensureReportMonth();
   try{
     if(state.salesTab==='upload') return renderSalesUpload(body);
-    if(state.salesTab==='reports') return renderSalesReports(body);
+    if(state.salesTab==='branchperf') return renderBranchPerf(body);
+    if(state.salesTab==='category') return renderCategoryReport(body);
+    if(state.salesTab==='item') return renderItemReport(body);
+    if(state.salesTab==='admin') return renderAdminReport(body);
     if(state.salesTab==='entries') return renderSalesEntries(body);
     if(state.salesTab==='batches') return renderSalesBatches(body);
     return renderSalesOverview(body);
@@ -2667,6 +2678,23 @@ function renderMerchReport(el){
 const SERVICES_ORDER = ['GYM','HIIT','Personal Training','Martial Arts','OTHERS'];
 const QUARTERS = {1:'Q1',2:'Q1',3:'Q1',4:'Q2',5:'Q2',6:'Q2',7:'Q3',8:'Q3',9:'Q3',10:'Q4',11:'Q4',12:'Q4'};
 
+// Per-admin monthly figures from the Admin Sales Tracker xlsx (SALES COMMISSION SUMMARY 2026).
+// Sales by Admin reads this directly (not the POS/admin-tracker sales rows).
+// Months are Jan..Jun 2026 only — July is hidden until the July POS report is uploaded.
+const ADMIN_PERF_2026 = {
+  year: 2026,
+  months: [1,2,3,4,5,6],
+  admins: {
+    'Andre':   { sales: [510726, 408059, 392215, 608596, 491463, 495741], target: [425000, 425000, 425000, 500000, 425000, 425000] },
+    'Mica':    { sales: [321623, 286770, 529497, 511746, 245313, 340170], target: [425000, 425000, 425000, 500000, 425000, 425000] },
+    'Loraine': { sales: [297010, 285923, 240550, 365530, 294747, 441708], target: [325000, 325000, 325000, 400000, 325000, 375000] },
+    'Kloe':    { sales: [361883, 247940, 410304, 448116, 256751,  69000], target: [325000, 325000, 325000, 400000, 325000, 275000] },
+    'Francis': { sales: [0, 0, 0, 0, 0, 43849], target: [0, 0, 0, 0, 0, 100000] },
+    'Ela':     { sales: [0, 58970, 31890, 22360, 43367, 22670], target: [0, 0, 0, 0, 0, 0] },
+    'Emman':   { sales: [0, 0, 0, 0, 0, 0], target: [0, 0, 0, 0, 0, 0] },
+  }
+};
+
 function renderSalesReports(el){
   if(!state.reportWhich) state.reportWhich = 'category';
   if(!state.reportBranch) state.reportBranch = 'All';
@@ -2985,6 +3013,270 @@ function reportDataCheck(host){
   n2.innerHTML='<strong>Why two columns can differ:</strong> "Core services (POS)" comes from the POS Sales Breakdown files and drives reports 1–4. "Admin tracker" comes from the Roshan Gym Admin Sales Tracker and drives report 5 only. They cover the same sales from different systems, so small differences are normal.';
   host.appendChild(n2);
 }
+// ===================== SALES DASHBOARD — sub-tab reports =====================
+// Shared helpers for the four report sub-tabs (Performance per Branch, Sales by
+// Category, Sales by Item, Sales by Admin). July is intentionally absent from the
+// loaded POS data and from the admin xlsx, so it stays hidden until uploaded.
+function money(v){ return fmtMoney(v).replace('PHP ',''); }
+function reportEmpty(host){ const e=document.createElement('div'); e.className='empty'; e.textContent='No sales loaded yet.'; host.appendChild(e); }
+function ensureReportMonth(){
+  if(state.reportMonth) return;
+  let latest=null;
+  state.sales.forEach(s=>{ if(!isPosSale(s)||!isCoreSale(s))return; const ym=s.date.slice(0,7);
+    if(ym.slice(5,7)==='07')return; if(!latest||ym>latest)latest=ym; });
+  state.reportMonth = latest || '2026-06';
+}
+function periodMonths(period, ym){
+  const m=Number(ym.slice(5,7));
+  if(period==='quarter'){ const q=QUARTERS[m]; return Object.keys(QUARTERS).filter(k=>QUARTERS[k]===q).map(Number); }
+  if(period==='year'){ return [1,2,3,4,5,6,7,8,9,10,11,12]; }
+  return [m];
+}
+function periodLabelFor(period, ym, yr){
+  if(period==='quarter') return `${QUARTERS[Number(ym.slice(5,7))]} ${yr}`;
+  if(period==='year') return String(yr);
+  return monthLabel(ym);
+}
+function salesInPeriod(branch, yr, monthsArr){
+  return state.sales.filter(s=>{
+    if(!isPosSale(s)||!isCoreSale(s)) return false;
+    if(branch!=='All' && (s.branch||'')!==branch) return false;
+    if(Number(s.date.slice(0,4))!==yr) return false;
+    return monthsArr.includes(Number(s.date.slice(5,7)));
+  });
+}
+function minTargetSeries(yr, branch){
+  const arr=new Array(12).fill(0);
+  const pull=(br)=>{ (state.targets||[]).forEach(t=>{ if(t.year===yr && t.branch===br) arr[t.month-1]=Number(t.min_target)||0; }); };
+  if(branch==='All'){
+    pull('All');
+    if(arr.every(v=>v===0)){
+      const m=new Array(12).fill(0);
+      (state.targets||[]).forEach(t=>{ if(t.year===yr && (t.branch==='Manila'||t.branch==='Malabon')) m[t.month-1]+=Number(t.min_target)||0; });
+      return m;
+    }
+    return arr;
+  }
+  pull(branch); return arr;
+}
+function salesReportFilterBar(host, opts){
+  opts=opts||{};
+  const bar=document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
+  if(opts.branch){
+    const brSel=document.createElement('select');
+    brSel.innerHTML=['All','Manila','Malabon'].map(b=>`<option value="${b}" ${state.reportBranch===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
+    brSel.onchange=()=>{ state.reportBranch=brSel.value; render(); };
+    bar.appendChild(brSel);
+  }
+  if(opts.period){
+    const pSel=document.createElement('select');
+    pSel.innerHTML=[['month','Monthly'],['quarter','Quarterly'],['year','Yearly']].map(([v,l])=>`<option value="${v}" ${state.reportPeriod===v?'selected':''}>${l}</option>`).join('');
+    pSel.onchange=()=>{ state.reportPeriod=pSel.value; render(); };
+    bar.appendChild(pSel);
+  }
+  const mInput=document.createElement('input'); mInput.type='month'; mInput.value=state.reportMonth;
+  mInput.onchange=(e)=>{ state.reportMonth=e.target.value; render(); };
+  bar.appendChild(mInput);
+  host.appendChild(bar);
+}
+
+// ---- Sub-tab 1: Performance per Branch (Month vs Month + Sales vs Target) ----
+function renderBranchPerf(host){
+  salesReportFilterBar(host, {branch:true, period:true});
+  if(!state.sales.length){ reportEmpty(host); return; }
+  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch;
+  const months=[]; for(let m=1;m<=12;m++) months.push(`${yr}-${String(m).padStart(2,'0')}`);
+  const mnl=months.map(ym=>salesInScope('Manila',ym).reduce((a,b)=>a+b.amount,0));
+  const mbn=months.map(ym=>salesInScope('Malabon',ym).reduce((a,b)=>a+b.amount,0));
+  const both=months.map((_,i)=>mnl[i]+mbn[i]);
+  const scope = branch==='Manila'?mnl : branch==='Malabon'?mbn : both;
+  const scopeTotal=scope.reduce((a,b)=>a+b,0);
+  titleCard(host, `Total Sales Month vs Month — ${yr}${branch!=='All'?' · '+branch:''}`, scopeTotal);
+
+  const minT=minTargetSeries(yr, branch);
+  const card=sectionCard(host,'Monthly totals by branch');
+  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; card.appendChild(cv);
+  const datasets=[];
+  if(branch==='All'){
+    datasets.push({label:'Manila',data:mnl,backgroundColor:'#7f9dc4',borderRadius:4});
+    datasets.push({label:'Malabon',data:mbn,backgroundColor:'#c96b6b',borderRadius:4});
+  } else {
+    datasets.push({label:branch,data:scope,backgroundColor:branch==='Manila'?'#7f9dc4':'#c96b6b',borderRadius:4});
+  }
+  // Minimum-target line replaces the old "Combined" line.
+  datasets.push({type:'line',label:'Min target',data:minT,borderColor:'#d1a56b',borderWidth:2,tension:.2,pointRadius:2});
+  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+    cv._c=new Chart(cv,{type:'bar',data:{labels:MONTH_NAMES,datasets},options:barOpts()});},30);
+
+  const rows=months.map((ym,i)=>{
+    const prev=i>0?scope[i-1]:0;
+    const g=prev?((scope[i]-prev)/prev*100):0;
+    return {name:MONTH_NAMES[i], mnl:mnl[i], mbn:mbn[i], val:scope[i], growth:(i>0&&prev)?(g>=0?'+':'')+g.toFixed(1)+'%':'—'};
+  }).filter(r=>r.val>0);
+  const tcard=sectionCard(host,'Month-on-month growth'+(branch!=='All'?` — ${branch}`:''));
+  if(branch==='All'){
+    tableFrom(tcard,['Month','Manila','Malabon','Combined','MoM growth'],
+      rows.map(r=>[r.name, money(r.mnl), money(r.mbn), money(r.val), r.growth]));
+  } else {
+    tableFrom(tcard,['Month',branch,'MoM growth'], rows.map(r=>[r.name, money(r.val), r.growth]));
+  }
+
+  const div=document.createElement('div'); div.style.cssText='height:1px;background:var(--line);margin:22px 0;'; host.appendChild(div);
+  reportVsTarget(host); // "Sales vs Target is okay" — reused unchanged.
+}
+
+// ---- Sub-tab 2: Sales by Category ----
+function renderCategoryReport(host){
+  salesReportFilterBar(host, {branch:true, period:true});
+  if(!state.sales.length){ reportEmpty(host); return; }
+  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
+  const mArr=periodMonths(period, state.reportMonth);
+  const plabel=periodLabelFor(period, state.reportMonth, yr);
+  const sales=salesInPeriod(branch, yr, mArr);
+  const by={}; sales.forEach(s=>{ const c=s.category||'OTHERS'; by[c]=(by[c]||0)+s.amount; });
+  const total=Object.values(by).reduce((a,b)=>a+b,0);
+  titleCard(host, `Sales by Category — ${plabel}${branch!=='All'?' · '+branch:''}`, total);
+  const pairs=Object.entries(by).sort((a,b)=>b[1]-a[1]);
+  twoCol(host, (c)=>pieCanvas(c, pairs.map(p=>p[0]), pairs.map(p=>p[1])), (c)=>breakdownTable(c, pairs, total||1));
+
+  const cats=pairs.map(p=>p[0]);
+  const mcard=sectionCard(host,'Month-by-month by category'+(branch!=='All'?` · ${branch}`:''));
+  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
+  const palette=chartPalette(Math.max(cats.length,1));
+  const ds=cats.map((cat,i)=>({label:cat,
+    data:[1,2,3,4,5,6,7,8,9,10,11,12].map(m=>salesInPeriod(branch,yr,[m]).filter(x=>(x.category||'OTHERS')===cat).reduce((a,b)=>a+b.amount,0)),
+    backgroundColor:palette[i],borderRadius:3}));
+  const stackedOpts={...barOpts()};
+  stackedOpts.scales={x:{stacked:true,ticks:{color:'#8b949e',font:{size:10}},grid:{color:'rgba(255,255,255,.05)'}},
+    y:{stacked:true,ticks:{color:'#8b949e',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}}};
+  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+    cv._c=new Chart(cv,{type:'bar',data:{labels:MONTH_NAMES,datasets:ds},options:stackedOpts});},30);
+
+  const bcard=sectionCard(host,'Branch comparison by category — '+plabel);
+  const cv2=document.createElement('canvas'); cv2.style.maxHeight='320px'; bcard.appendChild(cv2);
+  const catList = cats.length?cats:Object.keys(by);
+  const bmnl=catList.map(cat=>salesInPeriod('Manila',yr,mArr).filter(x=>(x.category||'OTHERS')===cat).reduce((a,b)=>a+b.amount,0));
+  const bmbn=catList.map(cat=>salesInPeriod('Malabon',yr,mArr).filter(x=>(x.category||'OTHERS')===cat).reduce((a,b)=>a+b.amount,0));
+  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv2._c)cv2._c.destroy();
+    cv2._c=new Chart(cv2,{type:'bar',data:{labels:catList,datasets:[
+      {label:'Manila',data:bmnl,backgroundColor:'#7f9dc4',borderRadius:4},
+      {label:'Malabon',data:bmbn,backgroundColor:'#c96b6b',borderRadius:4}]},options:barOpts()});},30);
+}
+
+// ---- Sub-tab 3: Sales by Item (service breakdown + qty + detailed total) ----
+function renderItemReport(host){
+  salesReportFilterBar(host, {branch:true, period:true});
+  if(!state.sales.length){ reportEmpty(host); return; }
+  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
+  const mArr=periodMonths(period, state.reportMonth);
+  const plabel=periodLabelFor(period, state.reportMonth, yr);
+  const sales=salesInPeriod(branch, yr, mArr);
+  const by={}, qty={}; SERVICES_ORDER.forEach(s=>{by[s]=0;qty[s]=0;});
+  sales.forEach(s=>{ const c=SERVICES_ORDER.includes(s.category)?s.category:'OTHERS'; by[c]=(by[c]||0)+s.amount; qty[c]=(qty[c]||0)+(s.qty||0); });
+  const total=Object.values(by).reduce((a,b)=>a+b,0);
+  titleCard(host, `Sales by Item — ${plabel}${branch!=='All'?' · '+branch:''}`, total);
+  const pairs=SERVICES_ORDER.map(s=>[s,by[s]]).filter(p=>p[1]>0);
+
+  const wrap=document.createElement('div'); wrap.className='card';
+  wrap.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;';
+  const L=document.createElement('div'), R=document.createElement('div'); wrap.appendChild(L); wrap.appendChild(R); host.appendChild(wrap);
+  pieCanvas(L, pairs.map(p=>p[0]), pairs.map(p=>p[1]));
+  const st=document.createElement('table'); st.className='simple'; st.style.width='100%';
+  st.innerHTML='<thead><tr><th>Service</th><th style="text-align:right">Qty</th><th style="text-align:right">Sales</th><th style="text-align:right">Share</th></tr></thead>';
+  const stb=document.createElement('tbody');
+  pairs.forEach(([k,v])=>{ const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${escapeHtml(k)}</td><td style="text-align:right">${(qty[k]||0).toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(v)}</td><td style="text-align:right">${(v/(total||1)*100).toFixed(1)}%</td>`;
+    stb.appendChild(tr); });
+  const totQty=Object.values(qty).reduce((a,b)=>a+b,0);
+  const stot=document.createElement('tr'); stot.style.cssText='font-weight:700;border-top:2px solid var(--line)';
+  stot.innerHTML=`<td>Total</td><td style="text-align:right">${totQty.toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(total)}</td><td style="text-align:right">100%</td>`;
+  stb.appendChild(stot); st.appendChild(stb); R.appendChild(st);
+  if(window.innerWidth<720) wrap.style.gridTemplateColumns='1fr';
+
+  if(branch==='All'){
+    const card=sectionCard(host,'Service by branch — '+plabel);
+    const cv=document.createElement('canvas'); cv.style.maxHeight='300px'; card.appendChild(cv);
+    const mnl=SERVICES_ORDER.map(s=>salesInPeriod('Manila',yr,mArr).filter(x=>x.category===s).reduce((a,b)=>a+b.amount,0));
+    const mbn=SERVICES_ORDER.map(s=>salesInPeriod('Malabon',yr,mArr).filter(x=>x.category===s).reduce((a,b)=>a+b.amount,0));
+    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+      cv._c=new Chart(cv,{type:'bar',data:{labels:SERVICES_ORDER,datasets:[
+        {label:'Manila',data:mnl,backgroundColor:'#7f9dc4',borderRadius:4},
+        {label:'Malabon',data:mbn,backgroundColor:'#c96b6b',borderRadius:4}]},options:barOpts()});},30);
+  }
+
+  const detCard=sectionCard(host,'Sales per category (detailed)');
+  const byDet={}, qtyDet={};
+  sales.forEach(s=>{ const d=(s.description||s.item||s.category||'—'); byDet[d]=(byDet[d]||0)+s.amount; qtyDet[d]=(qtyDet[d]||0)+(s.qty||0); });
+  const detPairs=Object.entries(byDet).sort((a,b)=>b[1]-a[1]);
+  const dt=document.createElement('table'); dt.className='simple'; dt.style.width='100%';
+  dt.innerHTML='<thead><tr><th>Category</th><th style="text-align:right">Qty</th><th style="text-align:right">Sales</th><th style="text-align:right">Share</th></tr></thead>';
+  const dtb=document.createElement('tbody');
+  let detTotal=0, detQty=0;
+  detPairs.forEach(([k,v])=>{ detTotal+=v; detQty+=(qtyDet[k]||0);
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${escapeHtml(k)}</td><td style="text-align:right">${(qtyDet[k]||0).toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(v)}</td><td style="text-align:right">${(v/(total||1)*100).toFixed(1)}%</td>`;
+    dtb.appendChild(tr); });
+  const dtot=document.createElement('tr'); dtot.style.cssText='font-weight:700;border-top:2px solid var(--line)';
+  dtot.innerHTML=`<td>TOTAL</td><td style="text-align:right">${detQty.toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(detTotal)}</td><td style="text-align:right">100%</td>`;
+  dtb.appendChild(dtot); dt.appendChild(dtb); detCard.appendChild(dt);
+  const tie=document.createElement('div'); tie.className='notice';
+  tie.innerHTML = Math.round(detTotal)===Math.round(total)
+    ? `✓ Detailed total ${fmtMoney(detTotal)} matches the Sales-by-Item total above.`
+    : `⚠ Detailed total ${fmtMoney(detTotal)} vs by-item total ${fmtMoney(total)} — difference ${fmtMoney(Math.abs(detTotal-total))}.`;
+  detCard.appendChild(tie);
+}
+
+// ---- Sub-tab 4: Sales by Admin (from the Admin Sales Tracker xlsx) ----
+function renderAdminReport(host){
+  salesReportFilterBar(host, {branch:false, period:true});
+  const yr=Number(state.reportMonth.slice(0,4)), period=state.reportPeriod;
+  const perf=ADMIN_PERF_2026;
+  const mArr=periodMonths(period, state.reportMonth).filter(m=>perf.months.includes(m));
+  const plabel=periodLabelFor(period, state.reportMonth, yr);
+  if(yr!==perf.year || !mArr.length){
+    const note=document.createElement('div'); note.className='notice';
+    note.textContent='No admin performance data for this period. The Admin Sales Tracker covers Jan–Jun 2026 (July is hidden until the July POS report is uploaded).';
+    host.appendChild(note); return;
+  }
+  const idx=m=>perf.months.indexOf(m);
+  const rows=Object.entries(perf.admins).map(([name,d])=>{
+    const sales=mArr.reduce((a,m)=>a+d.sales[idx(m)],0);
+    const target=mArr.reduce((a,m)=>a+d.target[idx(m)],0);
+    return {name, sales, target};
+  }).filter(r=>r.sales>0 || r.target>0).sort((a,b)=>b.sales-a.sales);
+  const teamSales=rows.reduce((a,b)=>a+b.sales,0), teamTarget=rows.reduce((a,b)=>a+b.target,0);
+  titleCard(host, `Sales by Admin — ${plabel}`, teamSales,
+    teamTarget?`team at ${(teamSales/teamTarget*100).toFixed(1)}% of quota (${fmtMoney(teamTarget)})`:'');
+
+  twoCol(host,
+    (c)=>barhCanvas(c, rows.map(r=>r.name), rows.map(r=>r.sales)),
+    (c)=>pieCanvas(c, rows.map(r=>r.name), rows.map(r=>r.sales)));
+
+  const tcard=sectionCard(host,'Per-admin vs quota — '+plabel);
+  tableFrom(tcard, ['Admin','Sales','Quota','Attainment','Over/Under','Share'],
+    rows.map(r=>{
+      const diff=r.sales-r.target;
+      return [r.name, money(r.sales), r.target?money(r.target):'—',
+        r.target?(r.sales/r.target*100).toFixed(0)+'%':'—',
+        (diff>=0?'+':'')+money(Math.abs(diff)),
+        teamSales?(r.sales/teamSales*100).toFixed(1)+'%':'—'];
+    }), rows.map(r=>r.target?r.sales>=r.target:true));
+
+  if(teamTarget){
+    const scard=sectionCard(host,'Team total vs quota');
+    const cv=document.createElement('canvas'); cv.style.maxHeight='150px'; scard.appendChild(cv);
+    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+      cv._c=new Chart(cv,{type:'bar',data:{labels:['Team'],datasets:[
+        {label:'Actual',data:[teamSales],backgroundColor:teamSales>=teamTarget?'#7fae82':'#c96b6b',borderRadius:4},
+        {label:'Quota',data:[teamTarget],backgroundColor:'rgba(255,255,255,.15)',borderRadius:4}]},
+      options:{...barOpts(), indexAxis:'y'}});},30);
+  }
+  const note=document.createElement('div'); note.className='notice';
+  note.textContent='Sales by Admin is sourced from the Roshan Gym Admin Sales Tracker (per-admin monthly sales and quotas). Jan–Jun 2026; July hidden until the July POS report is uploaded.';
+  host.appendChild(note);
+}
+// =================== end Sales Dashboard sub-tab reports ===================
+
 function monthLabel(ym){ const [y,m]=ym.split('-'); return `${MONTH_NAMES[Number(m)-1]} ${y}`; }
 function titleCard(host,title,total,subtitle){
   const c=document.createElement('div'); c.className='card';
