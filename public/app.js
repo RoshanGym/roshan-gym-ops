@@ -919,6 +919,39 @@ function renderMySummary(el){
   if(state.checkSummary.trend) el.appendChild(trendBars(state.checkSummary.trend));
 }
 
+// Weekday rest days (0=Sun … 6=Sat) — an editable layer saved in this browser.
+// The backend also has a permanent "Rest day" (shift_end_hour=0) set in Staff directory;
+// this adds a specific weekly day off. Seeded with the current schedule.
+const REST_DAY_LS_KEY = 'roshan.restWeekday';
+const DEFAULT_REST_WEEKDAY = { andre:0, emman:6, ela:0, kloe:0, loraine:6 }; // Sun/Sat
+const WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+function loadRestWeekdays(){
+  if(state.restWeekdays) return state.restWeekdays;
+  let o={};
+  try{ if(typeof localStorage!=='undefined'){ const raw=localStorage.getItem(REST_DAY_LS_KEY); if(raw) o=JSON.parse(raw)||{}; } }catch(e){ o={}; }
+  state.restWeekdays=o; return o;
+}
+function saveRestWeekday(staffId, day){
+  const o=loadRestWeekdays();
+  if(day===''||day==null) delete o['id:'+staffId]; else o['id:'+staffId]=Number(day);
+  try{ if(typeof localStorage!=='undefined') localStorage.setItem(REST_DAY_LS_KEY, JSON.stringify(o)); }catch(e){}
+}
+// Resolve a staff's rest weekday: explicit per-id override first, else seeded default by first name.
+function restWeekdayForStaff(staffId, name){
+  const o=loadRestWeekdays();
+  if(Object.prototype.hasOwnProperty.call(o,'id:'+staffId)) return o['id:'+staffId];
+  const low=(name||'').toLowerCase();
+  for(const k of Object.keys(DEFAULT_REST_WEEKDAY)){ if(low.includes(k)) return DEFAULT_REST_WEEKDAY[k]; }
+  return null;
+}
+function isRestDayOn(staffId, name, dateStr, shiftEndHour){
+  if(shiftEndHour===0) return true; // permanent rest set in Staff directory
+  const d=restWeekdayForStaff(staffId, name);
+  if(d==null) return false;
+  const dt=new Date(dateStr+'T00:00:00');
+  return dt.getDay()===d;
+}
+
 function renderTeamOverview(el){
   if(!state.checklistDate) state.checklistDate = todayStr();
   const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
@@ -955,11 +988,14 @@ function renderTeamOverview(el){
     return;
   }
 
-  const per = state.checkSummary.perStaff;
+  const date = state.checklistDate;
+  const per = state.checkSummary.perStaff.filter(p=>{ const s=(state.staff||[]).find(x=>x.id===p.staffId); return !s || s.active!==false; });
   if(!per.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No staff have checklist templates yet. Use "Manage templates" to set them up.'; el.appendChild(e); return; }
+  const isRest = (p)=>isRestDayOn(p.staffId, p.name, date, p.shiftEndHour);
+  const working = per.filter(p=>!isRest(p));
 
-  // Escalation alert: admins who still had open daily tasks after their shift end.
-  const escalatedStaff = per.filter(p=>p.escalated);
+  // Escalation alert: admins who still had open daily tasks after shift end (rest days excluded).
+  const escalatedStaff = per.filter(p=>p.escalated && !isRest(p));
   if(escalatedStaff.length){
     const shiftLabel = (h)=> h===0 ? 'rest day' : ((h>12?(h-12):h) + ':00 ' + (h>=12?'PM':'AM'));
     const alert = document.createElement('div'); alert.className='notice err';
@@ -973,16 +1009,17 @@ function renderTeamOverview(el){
     el.appendChild(ok);
   }
 
-  const totalDone = per.reduce((s,p)=>s+p.dailyDone,0);
-  const totalAll = per.reduce((s,p)=>s+p.dailyTotal,0);
-  const fullyDone = per.filter(p=>p.dailyTotal>0 && p.dailyDone===p.dailyTotal).length;
-  const notStarted = per.filter(p=>p.dailyDone===0 && p.dailyTotal>0).length;
+  const totalDone = working.reduce((s,p)=>s+p.dailyDone,0);
+  const totalAll = working.reduce((s,p)=>s+p.dailyTotal,0);
+  const fullyDone = working.filter(p=>p.dailyTotal>0 && p.dailyDone===p.dailyTotal).length;
+  const notStarted = working.filter(p=>p.dailyDone===0 && p.dailyTotal>0).length;
+  const restCount = per.length - working.length;
   const metrics = document.createElement('div'); metrics.className='metrics';
   metrics.innerHTML = `
     <div class="metric"><div class="num">${totalAll?Math.round(totalDone/totalAll*100):0}%</div><div class="lbl">Team daily completion</div></div>
     <div class="metric good"><div class="num">${fullyDone}</div><div class="lbl">Staff fully done today</div></div>
     <div class="metric ${notStarted>0?'flag':''}"><div class="num">${notStarted}</div><div class="lbl">Staff not started</div></div>
-    <div class="metric"><div class="num">${per.length}</div><div class="lbl">Staff with checklists</div></div>
+    <div class="metric"><div class="num">${restCount}</div><div class="lbl">On rest day</div></div>
   `;
   el.appendChild(metrics);
 
@@ -992,18 +1029,33 @@ function renderTeamOverview(el){
   table.innerHTML = '<thead><tr><th>Employee</th><th>Shift end</th><th>Daily tasks</th><th>Progress</th><th>Weekly tasks</th><th>Last completed</th><th></th></tr></thead>';
   const tbody = document.createElement('tbody');
   const shiftLbl = (h)=> h===0 ? 'Rest day' : ((h>12?(h-12):h) + ':00 ' + (h>=12?'PM':'AM'));
-  per.sort((a,b)=> (b.dailyTotal?b.dailyDone/b.dailyTotal:0) - (a.dailyTotal?a.dailyDone/a.dailyTotal:0));
+  per.sort((a,b)=>{
+    const ra=isRest(a)?1:0, rb=isRest(b)?1:0; if(ra!==rb) return ra-rb; // rest days last
+    return (b.dailyTotal?b.dailyDone/b.dailyTotal:0) - (a.dailyTotal?a.dailyDone/a.dailyTotal:0);
+  });
   per.forEach(p=>{
+    const rest = isRest(p);
     const pct = p.dailyTotal ? Math.round(p.dailyDone/p.dailyTotal*100) : 0;
     const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${escapeHtml(p.name)}${p.escalated?' <span class="badge flag">escalated</span>':''}</td>
-      <td class="hint">${shiftLbl(p.shiftEndHour!=null?p.shiftEndHour:15)}</td>
-      <td>${p.dailyDone}/${p.dailyTotal}${p.dailySkipped?' <span class="hint">('+p.dailySkipped+' skipped)</span>':''}</td>
-      <td style="min-width:140px;"><div class="bt" style="height:8px;"><div class="bf" style="width:${pct}%;${pct===100?'background:var(--lime);':''}"></div></div></td>
-      <td>${p.weeklyDone}/${p.weeklyTotal}</td>
-      <td>${p.lastUpdate?fmtDateTime(p.lastUpdate):'—'}</td>
-    `;
+    if(rest){
+      const wd = restWeekdayForStaff(p.staffId, p.name);
+      const restLbl = (p.shiftEndHour===0 || wd==null) ? 'Rest day' : ('Rest day · '+WEEKDAY_NAMES[wd]);
+      tr.innerHTML = `
+        <td>${escapeHtml(p.name)}</td>
+        <td class="hint">${restLbl}</td>
+        <td><span class="badge neutral">Rest day</span></td>
+        <td class="hint">—</td>
+        <td class="hint">—</td>
+        <td>${p.lastUpdate?fmtDateTime(p.lastUpdate):'—'}</td>`;
+    } else {
+      tr.innerHTML = `
+        <td>${escapeHtml(p.name)}${p.escalated?' <span class="badge flag">escalated</span>':''}</td>
+        <td class="hint">${shiftLbl(p.shiftEndHour!=null?p.shiftEndHour:15)}</td>
+        <td>${p.dailyDone}/${p.dailyTotal}${p.dailySkipped?' <span class="hint">('+p.dailySkipped+' skipped)</span>':''}</td>
+        <td style="min-width:140px;"><div class="bt" style="height:8px;"><div class="bf" style="width:${pct}%;${pct===100?'background:var(--lime);':''}"></div></div></td>
+        <td>${p.weeklyDone}/${p.weeklyTotal}</td>
+        <td>${p.lastUpdate?fmtDateTime(p.lastUpdate):'—'}</td>`;
+    }
     const td = document.createElement('td');
     const b = document.createElement('button'); b.className='btn sm'; b.textContent='Open checklist';
     b.onclick = ()=>{ state.checklistStaff = p.staffId; state.checklist=null; state.tasksTab='checklist'; render(); };
@@ -1014,6 +1066,25 @@ function renderTeamOverview(el){
   scroll.appendChild(table);
   card.appendChild(scroll);
   el.appendChild(card);
+
+  // Weekly rest-day editor (Super Admin).
+  const rcard = document.createElement('div'); rcard.className='card';
+  rcard.innerHTML = '<h2 style="font-size:14px;color:#ffffff;margin-bottom:6px;">Weekly rest days</h2>'
+    + '<div class="hint" style="margin-bottom:10px;">Set each person\u2019s day off. On that weekday their checklist won\u2019t count as incomplete or escalate here. Saved in this browser. (A permanent day off and shift-end times are set in Staff directory.)</div>';
+  const rtbl = document.createElement('table'); rtbl.className='simple'; rtbl.style.width='100%';
+  rtbl.innerHTML = '<thead><tr><th>Employee</th><th>Day off</th></tr></thead>';
+  const rtb = document.createElement('tbody');
+  per.forEach(p=>{
+    const tr=document.createElement('tr');
+    const cur = restWeekdayForStaff(p.staffId, p.name);
+    const sel=document.createElement('select'); sel.style.cssText='font-size:12px;padding:4px 6px;';
+    sel.innerHTML = '<option value="">None</option>' + WEEKDAY_NAMES.map((w,i)=>`<option value="${i}" ${cur===i?'selected':''}>${w}</option>`).join('');
+    sel.onchange=()=>{ saveRestWeekday(p.staffId, sel.value===''?null:sel.value); render(); };
+    const td1=document.createElement('td'); td1.textContent=p.name;
+    const td2=document.createElement('td'); td2.appendChild(sel);
+    tr.appendChild(td1); tr.appendChild(td2); rtb.appendChild(tr);
+  });
+  rtbl.appendChild(rtb); rcard.appendChild(rtbl); el.appendChild(rcard);
 }
 
 function renderTemplatesView(el){
