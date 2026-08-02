@@ -5,7 +5,6 @@ const SECTIONS = [
   {key:'potracker', label:'PO tracker', sub:'PO, check payment, and delivery receipt matched automatically.'},
   {key:'sales', label:'Sales Dashboard', sub:'Revenue reports, targets, and admin performance.'},
   {key:'membership', label:'Membership tracker', sub:'Active, expiring, and expired memberships.'},
-  {key:'repository', label:'Repository', sub:'Every PO, check, and receipt in one place.'},
 ];
 
 let state = {
@@ -406,7 +405,7 @@ function renderContent(){
     return renderSales(el);
   }
   if(state.section==='membership') return renderMembership(el);
-  if(state.section==='repository') return renderRepository(el);
+  if(state.section==='repository'){ state.section='potracker'; return renderPoTracker(el); }
 }
 
 function divider(){ const d=document.createElement('div'); d.className='divider'; return d; }
@@ -1440,6 +1439,19 @@ function renderNewTaskModal(modal){
   row.appendChild(b); modal.appendChild(row);
 }
 
+// Free-text search across a request's fields (used by PO, Petty Cash, and the tracker).
+function requestSearchText(r){
+  const parts=[r.id, r.title, r.payee, r.supplier, r.requestor, r.createdBy, r.notes, r.branch, r.status,
+    (r.type==='PO'?'purchase order':'petty cash'), String(r.amount), r.paymentMethod,
+    r.check&&r.check.number, r.check&&r.check.bank, r.delivery&&r.delivery.receiptNo, r.pos&&r.pos.reference];
+  (r.lineItems||[]).forEach(li=>parts.push(li.item||li.name||li.description||li.desc));
+  return parts.filter(Boolean).join(' ').toLowerCase();
+}
+function requestMatchesQuery(searchText, q){
+  const toks=(q||'').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return toks.every(t=>searchText.includes(t));
+}
+
 // ============ PURCHASE ORDERS / PETTY CASH (shared engine) ============
 function computeReqMetrics(type){
   const reqs = activeRequests().filter(r=>r.type===type);
@@ -1465,6 +1477,11 @@ function renderRequestsSection(el, type){
   const head = document.createElement('div'); head.className='section-head';
   head.innerHTML = `<h2>${type==='PO'?'Purchase orders':'Reimbursement requests'}</h2>`;
   const btnGroup = document.createElement('div'); btnGroup.className='toolbar';
+  if(!state.reqSearch) state.reqSearch = {PO:'', PettyCash:''};
+  const searchInput = document.createElement('input');
+  searchInput.type='search'; searchInput.placeholder='Search ' + (type==='PO'?'purchase orders':'petty cash') + '\u2026';
+  searchInput.value = state.reqSearch[type] || ''; searchInput.style.minWidth='220px';
+  btnGroup.appendChild(searchInput);
   if(type==='PO'){
     const supBtn = document.createElement('button'); supBtn.className='btn'; supBtn.textContent='Suppliers directory';
     supBtn.onclick = ()=>{ state.modal = {type:'suppliers'}; render(); };
@@ -1544,7 +1561,14 @@ function renderRequestsSection(el, type){
     }
     el.appendChild(e); return;
   }
-  list.forEach(r=>el.appendChild(renderReqCard(r)));
+  const listWrap = document.createElement('div'); el.appendChild(listWrap);
+  list.forEach(r=>{ const c=renderReqCard(r); c.dataset.search=requestSearchText(r); listWrap.appendChild(c); });
+  const noMatch = document.createElement('div'); noMatch.className='empty'; noMatch.textContent='No matches for your search.'; noMatch.style.display='none'; el.appendChild(noMatch);
+  const applyReqSearch = ()=>{ const q=searchInput.value||''; let shown=0;
+    [...listWrap.children].forEach(c=>{ const ok=requestMatchesQuery(c.dataset.search||'', q); c.style.display=ok?'':'none'; if(ok)shown++; });
+    noMatch.style.display=shown?'none':''; };
+  searchInput.oninput=()=>{ state.reqSearch[type]=searchInput.value; applyReqSearch(); };
+  applyReqSearch();
 }
 
 function renderReqCard(r){
@@ -4614,6 +4638,10 @@ function renderPoTracker(el){
   const headTitle = state.trackerType==='PO' ? 'Purchase orders' : state.trackerType==='PettyCash' ? 'Petty cash' : 'All requests';
   trackerHead.innerHTML = `<h2>${headTitle}</h2>`;
   const tbar = document.createElement('div'); tbar.className='toolbar';
+  if(state.trackerSearch==null) state.trackerSearch='';
+  const tSearch = document.createElement('input');
+  tSearch.type='search'; tSearch.placeholder='Search requests\u2026'; tSearch.value=state.trackerSearch; tSearch.style.minWidth='220px';
+  tbar.appendChild(tSearch);
   const poCount = allRows.filter(r=>r.type==='PO').length;
   const pcCount = allRows.filter(r=>r.type==='PettyCash').length;
   const typeSel = document.createElement('select');
@@ -4645,6 +4673,7 @@ function renderPoTracker(el){
   const tbody = document.createElement('tbody');
   rows.forEach(r=>{
     const tr = document.createElement('tr');
+    tr.dataset.search = requestSearchText(r);
     tr.style.cursor = 'pointer';
     tr.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
     const paymentRef = r.check && r.check.number ? '#'+escapeHtml(r.check.number) : '—';
@@ -4676,6 +4705,10 @@ function renderPoTracker(el){
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
+  const applyTrackerSearch = ()=>{ const q=tSearch.value||'';
+    [...tbody.children].forEach(tr=>{ tr.style.display = requestMatchesQuery(tr.dataset.search||'', q) ? '' : 'none'; }); };
+  tSearch.oninput = ()=>{ state.trackerSearch=tSearch.value; applyTrackerSearch(); };
+  applyTrackerSearch();
   const tableCard = document.createElement('div'); tableCard.className='card';
   const scrollWrap = document.createElement('div'); scrollWrap.style.cssText='overflow-x:auto;';
   scrollWrap.appendChild(table);
