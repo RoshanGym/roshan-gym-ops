@@ -2703,6 +2703,44 @@ function adminTargetFor(name, monthNum){
   const idx=ADMIN_PERF_2026.months.indexOf(monthNum);
   return idx>=0 ? (Number(d.target[idx])||0) : 0;
 }
+// Match a POS "Staff" / entered_by value to one of our admin short names.
+// Most-specific tokens first so "Michaela..." maps to Mica, not Ela.
+const ADMIN_NAME_TOKENS = { Mica:['michaela','mica'], Emman:['emmannoel','emman'], Andre:['andre'],
+  Loraine:['loraine'], Kloe:['kloe'], Francis:['francis'], Ela:['ela'] };
+function adminOfName(enteredBy){
+  const s=(enteredBy||'').trim().toLowerCase(); if(!s) return null;
+  for(const name of Object.keys(ADMIN_PERF_2026.admins)){ if(s===name.toLowerCase()) return name; }
+  for(const name of ['Mica','Emman','Andre','Loraine','Kloe','Francis','Ela']){
+    if(ADMIN_NAME_TOKENS[name].some(tok=>s.includes(tok))) return name;
+  }
+  return null;
+}
+// An admin's sales for a month: embedded (Jan–Jul) or, from Aug on, the uploaded POS report.
+function adminSalesForMonth(name, monthNum){
+  const perf=ADMIN_PERF_2026; const idx=perf.months.indexOf(monthNum);
+  if(idx>=0) return Number(perf.admins[name].sales[idx])||0;
+  let sum=0;
+  state.sales.forEach(s=>{
+    if(!isPosSale(s)||!isCoreSale(s)) return;
+    if(Number(s.date.slice(0,4))!==perf.year) return;
+    if(Number(s.date.slice(5,7))!==monthNum) return;
+    if(adminOfName(s.enteredBy)!==name) return;
+    sum+=s.amount;
+  });
+  return sum;
+}
+// Months to show: embedded Jan–Jul plus any later month that has uploaded per-admin POS sales.
+function effectiveAdminMonths(){
+  const perf=ADMIN_PERF_2026; const set=new Set(perf.months);
+  const maxEmb=Math.max.apply(null, perf.months);
+  state.sales.forEach(s=>{
+    if(!isPosSale(s)||!isCoreSale(s)) return;
+    if(Number(s.date.slice(0,4))!==perf.year) return;
+    const m=Number(s.date.slice(5,7));
+    if(m>maxEmb && adminOfName(s.enteredBy)) set.add(m);
+  });
+  return [...set].sort((a,b)=>a-b);
+}
 
 function renderSalesReports(el){
   if(!state.reportWhich) state.reportWhich = 'category';
@@ -3438,37 +3476,64 @@ function renderAdminReport(host){
   const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
   const yr=P.yr; const perf=ADMIN_PERF_2026; const branch=state.reportBranch||'All';
   const adminIn=(name)=> branch==='All' || (perf.admins[name] && perf.admins[name].branch===branch);
-  const mArr=P.months.filter(m=>perf.months.includes(m));
+  const effMonths=effectiveAdminMonths();
+  const mnames=effMonths.map(m=>MONTH_NAMES[m-1]);
+  const mArr=P.months.filter(m=>effMonths.includes(m));
   const plabel=P.label;
   if(yr!==perf.year || !mArr.length){
     const note=document.createElement('div'); note.className='notice';
-    note.textContent='No admin performance data for this period. The Admin Sales Tracker covers Jan–Jul 2026.';
+    note.textContent='No admin performance data for this period. Jan\u2013Jul come from the tracker; Aug onward come from uploaded per-admin POS reports.';
     host.appendChild(note); return;
   }
-  const idx=m=>perf.months.indexOf(m);
-  const rows=Object.entries(perf.admins).filter(([name])=>adminIn(name)).map(([name,d])=>{
-    const sales=mArr.reduce((a,m)=>a+d.sales[idx(m)],0);
+  const allNames=Object.keys(perf.admins);
+  const rows=allNames.filter(name=>adminIn(name)).map(name=>{
+    const sales=mArr.reduce((a,m)=>a+adminSalesForMonth(name,m),0);
     const target=mArr.reduce((a,m)=>a+adminTargetFor(name,m),0);
     return {name, sales, target};
   }).filter(r=>r.sales>0 || r.target>0).sort((a,b)=>b.sales-a.sales);
   const teamSales=rows.reduce((a,b)=>a+b.sales,0), teamTarget=rows.reduce((a,b)=>a+b.target,0);
   if(!rows.length){ const n=document.createElement('div'); n.className='notice'; n.textContent='No admin data for this branch and period.'; host.appendChild(n); return; }
-  titleCard(host, `Sales by Admin — ${plabel}${branch!=='All'?' · '+branch:''}`, teamSales,
+  titleCard(host, `Sales by Admin \u2014 ${plabel}${branch!=='All'?' \u00b7 '+branch:''}`, teamSales,
     teamTarget?`team at ${(teamSales/teamTarget*100).toFixed(1)}% of quota (${fmtMoney(teamTarget)})`:'');
 
   twoCol(host,
     (c)=>barhCanvas(c, rows.map(r=>r.name), rows.map(r=>r.sales)),
     (c)=>pieCanvas(c, rows.map(r=>r.name), rows.map(r=>r.sales)));
 
-  const tcard=sectionCard(host,'Per-admin vs quota — '+plabel);
-  tableFrom(tcard, ['Admin','Sales','Quota','Attainment','Over/Under','Share'],
-    rows.map(r=>{
-      const diff=r.sales-r.target;
-      return [r.name, money(r.sales), r.target?money(r.target):'—',
-        r.target?(r.sales/r.target*100).toFixed(0)+'%':'—',
-        (diff>=0?'+':'')+money(Math.abs(diff)),
-        teamSales?(r.sales/teamSales*100).toFixed(1)+'%':'—'];
-    }), rows.map(r=>r.target?r.sales>=r.target:true));
+  // Per-admin vs quota. When a single month is selected, the Quota cell is editable.
+  const tcard=sectionCard(host,'Per-admin vs quota \u2014 '+plabel);
+  const editable = P.kind==='month';
+  const t=document.createElement('table'); t.className='simple'; t.style.width='100%';
+  t.innerHTML='<thead><tr><th>Admin</th><th style="text-align:right">Sales</th><th style="text-align:right">Quota</th><th style="text-align:right">Attainment</th><th style="text-align:right">Over/Under</th><th style="text-align:right">Share</th></tr></thead>';
+  const tb=document.createElement('tbody');
+  rows.forEach(r=>{
+    const diff=r.sales-r.target;
+    const col = (r.target? (r.sales>=r.target?'var(--lime)':'var(--red-ink)') : 'var(--lime)');
+    let quotaCell;
+    if(editable){
+      const m=mArr[0];
+      quotaCell='<input type="number" min="0" step="5000" value="'+(adminTargetFor(r.name,m)||'')+'" data-admin="'+escapeHtml(r.name)+'" data-month="'+m+'" class="quota-inp" style="width:104px;text-align:right;background:transparent;border:1px solid var(--line);border-radius:4px;color:#ffffff;padding:3px 6px;font-family:var(--font-m);">';
+    } else {
+      quotaCell = r.target?money(r.target):'\u2014';
+    }
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td>'+escapeHtml(r.name)+'</td>'
+      +'<td style="text-align:right;font-family:var(--font-m);color:'+col+'">'+money(r.sales)+'</td>'
+      +'<td style="text-align:right">'+quotaCell+'</td>'
+      +'<td style="text-align:right;color:'+col+'">'+(r.target?(r.sales/r.target*100).toFixed(0)+'%':'\u2014')+'</td>'
+      +'<td style="text-align:right;color:'+col+'">'+(diff>=0?'+':'')+money(Math.abs(diff))+'</td>'
+      +'<td style="text-align:right">'+(teamSales?(r.sales/teamSales*100).toFixed(1)+'%':'\u2014')+'</td>';
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb); tcard.appendChild(t);
+  if(editable){
+    const hint=document.createElement('div'); hint.className='hint'; hint.style.marginTop='6px';
+    hint.textContent='Quota is editable \u2014 type a value to set this admin\u2019s quota for '+plabel+' (saved in this browser). Use Quarterly/YTD to view totals.';
+    tcard.appendChild(hint);
+    tcard.querySelectorAll('.quota-inp').forEach(inp=>{
+      inp.onchange=()=>{ saveAdminQuotaOverride(inp.dataset.admin, Number(inp.dataset.month), inp.value===''?null:inp.value); render(); };
+    });
+  }
 
   if(teamTarget){
     const scard=sectionCard(host,'Team total vs quota');
@@ -3479,27 +3544,26 @@ function renderAdminReport(host){
         {label:'Quota',data:[teamTarget],backgroundColor:'rgba(255,255,255,.15)',borderRadius:4}]},
       options:{...barOpts(), indexAxis:'y'}});},30);
   }
+
   // --- Monthly sales performance per admin (+ per-admin sales vs target) ---
   const mcard=sectionCard(host,'Monthly sales per admin');
-  const mnames=perf.months.map(m=>MONTH_NAMES[m-1]);
-  const adminNames=Object.keys(perf.admins).filter(n=>adminIn(n) && perf.admins[n].sales.some(v=>v>0));
+  const adminNames=allNames.filter(n=>adminIn(n) && effMonths.some(m=>adminSalesForMonth(n,m)>0));
   if(!state.adminLinePick || (state.adminLinePick!=='All' && !adminNames.includes(state.adminLinePick))) state.adminLinePick='All';
   const pick=state.adminLinePick;
   const sel=document.createElement('select'); sel.style.marginBottom='12px';
-  sel.innerHTML=['All',...adminNames].map(n=>`<option value="${escapeHtml(n)}" ${n===pick?'selected':''}>${n==='All'?'All admins':escapeHtml(n)+' — sales vs target'}</option>`).join('');
+  sel.innerHTML=['All',...adminNames].map(n=>`<option value="${escapeHtml(n)}" ${n===pick?'selected':''}>${n==='All'?'All admins':escapeHtml(n)+' \u2014 sales vs target'}</option>`).join('');
   sel.onchange=()=>{ state.adminLinePick=sel.value; render(); };
   mcard.appendChild(sel);
   const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
   if(pick==='All'){
     const palette=chartPalette(adminNames.length);
-    const lineDs=adminNames.map((n,i)=>({label:n, data:perf.months.map((m,j)=>perf.admins[n].sales[j]),
+    const lineDs=adminNames.map((n,i)=>({label:n, data:effMonths.map(m=>adminSalesForMonth(n,m)),
       borderColor:palette[i], backgroundColor:palette[i], borderWidth:2, tension:.25, pointRadius:2, fill:false}));
     setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
       cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:lineDs},options:barOpts()});},30);
   } else {
-    const d=perf.admins[pick];
-    const sData=perf.months.map((m,j)=>d.sales[j]);
-    const tData=perf.months.map((m)=>adminTargetFor(pick,m));
+    const sData=effMonths.map(m=>adminSalesForMonth(pick,m));
+    const tData=effMonths.map(m=>adminTargetFor(pick,m));
     setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
       cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:[
         {label:pick+' sales', data:sData, borderColor:'#7fae82', backgroundColor:'#7fae82', borderWidth:2, tension:.25, pointRadius:3, fill:false},
@@ -3507,31 +3571,30 @@ function renderAdminReport(host){
       ]},options:barOpts()});},30);
     const sTot=sData.reduce((a,b)=>a+b,0), tTot=tData.reduce((a,b)=>a+b,0);
     const info=document.createElement('div'); info.className='notice';
-    info.innerHTML=`<strong>${escapeHtml(pick)}</strong> (${d.branch}) — sales ${fmtMoney(sTot)} vs quota ${fmtMoney(tTot)}${tTot?` · ${(sTot/tTot*100).toFixed(0)}% attainment`:' · no quota set'}.`;
+    info.innerHTML=`<strong>${escapeHtml(pick)}</strong> (${perf.admins[pick].branch}) \u2014 sales ${fmtMoney(sTot)} vs quota ${fmtMoney(tTot)}${tTot?` \u00b7 ${(sTot/tTot*100).toFixed(0)}% attainment`:' \u00b7 no quota set'}.`;
     mcard.appendChild(info);
   }
-  // numbers table: Admin | each month | Total (always the full team)
   const mrows=adminNames.map(n=>{
-    const vals=perf.months.map((m,j)=>perf.admins[n].sales[j]);
+    const vals=effMonths.map(m=>adminSalesForMonth(n,m));
     const tot=vals.reduce((a,b)=>a+b,0);
     return [n, ...vals.map(v=>money(v)), money(tot)];
   }).sort((a,b)=>parseFloat(b[b.length-1].replace(/,/g,''))-parseFloat(a[a.length-1].replace(/,/g,'')));
-  const colTot=perf.months.map((m,j)=>adminNames.reduce((a,n)=>a+perf.admins[n].sales[j],0));
+  const colTot=effMonths.map(m=>adminNames.reduce((a,n)=>a+adminSalesForMonth(n,m),0));
   mrows.push(['Team', ...colTot.map(v=>money(v)), money(colTot.reduce((a,b)=>a+b,0))]);
   tableFrom(mcard, ['Admin', ...mnames, 'Total'], mrows);
 
-  // --- Editable quotas: assign a monthly quota per admin (saved in this browser) ---
+  // --- Editable quota grid (all admins x months) ---
   const qcard=sectionCard(host,'Set monthly quota per admin');
   const qhint=document.createElement('div'); qhint.className='hint'; qhint.style.marginBottom='10px';
-  qhint.textContent='Type a quota for any admin and month. Saved in this browser and applied to the attainment figures above. Leave blank to fall back to the tracker default.';
+  qhint.textContent='Type a quota for any admin and month. Saved in this browser and applied to attainment above. Blank = tracker default.';
   qcard.appendChild(qhint);
   const qtbl=document.createElement('table'); qtbl.className='simple'; qtbl.style.width='100%';
-  qtbl.innerHTML='<thead><tr><th>Admin</th>'+perf.months.map(m=>`<th style="text-align:right">${MONTH_NAMES[m-1]}</th>`).join('')+'</tr></thead>';
+  qtbl.innerHTML='<thead><tr><th>Admin</th>'+effMonths.map(m=>`<th style="text-align:right">${MONTH_NAMES[m-1]}</th>`).join('')+'</tr></thead>';
   const qtb=document.createElement('tbody');
-  Object.keys(perf.admins).filter(n=>adminIn(n)).forEach(name=>{
+  allNames.filter(n=>adminIn(n)).forEach(name=>{
     const tr=document.createElement('tr');
     const nameTd=document.createElement('td'); nameTd.textContent=name; tr.appendChild(nameTd);
-    perf.months.forEach(m=>{
+    effMonths.forEach(m=>{
       const td=document.createElement('td'); td.style.textAlign='right';
       const inp=document.createElement('input'); inp.type='number'; inp.min='0'; inp.step='5000';
       inp.value=adminTargetFor(name,m)||'';
@@ -3547,9 +3610,10 @@ function renderAdminReport(host){
   qcard.appendChild(rstBtn);
 
   const note=document.createElement('div'); note.className='notice';
-  note.textContent='Sales by Admin: Jan–Jun from the Admin Sales Tracker xlsx, July from the uploaded July POS files (Ela = Manila All minus Andre+Mica+Emman). Branch reflects each admin\u2019s home branch. Francis had no July file.';
+  note.textContent='Sales by Admin: Jan\u2013Jun from the tracker xlsx, July from the July POS files, and August onward from uploaded per-admin POS reports (matched by staff name). Branch reflects each admin\u2019s home branch.';
   host.appendChild(note);
 }
+
 // =================== end Sales Dashboard sub-tab reports ===================
 
 // ---- Export all dashboards (data + charts) to a single .xlsx (instruction: backup) ----
