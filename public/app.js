@@ -64,6 +64,24 @@ function curName(){ return state.currentUser ? state.currentUser.name : 'Unknown
 function curRole(){ return state.currentUser ? state.currentUser.role : null; }
 function accessTier(role){ return (role==='Supervisor' || role==='Owner') ? 'SuperAdmin' : role; }
 
+// Sales Dashboard access:
+//  'full'   — Super Admins: all tabs, upload, and editing.
+//  'viewer' — Super Admins listed below (e.g. Ela): all tabs but view/filter/sort only.
+//  'admin'  — Admins: only the "Sales by Admin" tab, view only.
+//  'none'   — no access.
+const SALES_VIEW_ONLY = ['ela'];
+function salesRole(){
+  const tier = accessTier(curRole());
+  if(tier==='SuperAdmin'){
+    const u = state.currentUser||{};
+    const un = (u.username||u.name||'').trim().toLowerCase();
+    return SALES_VIEW_ONLY.includes(un) ? 'viewer' : 'full';
+  }
+  if(tier==='Admin') return 'admin';
+  return 'none';
+}
+function canEditSales(){ return salesRole()==='full'; }
+
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function monthStr(d){ return d.toISOString().slice(0,7); }
 function uid(){ return Math.random().toString(36).slice(2,9); }
@@ -294,7 +312,7 @@ function renderNav(){
   el.innerHTML = '';
   SECTIONS.forEach(s=>{
     // Sales Dashboard is Super Admin only.
-    if(s.key==='sales' && tier!=='SuperAdmin') return;
+    if(s.key==='sales' && salesRole()==='none') return;
     const b = document.createElement('button');
     b.className = 'nav-item' + (state.section===s.key ? ' active':'');
     b.innerHTML = '<span class="nav-dot"></span>' + s.label;
@@ -401,7 +419,7 @@ function renderContent(){
   if(state.section==='pettycash') return renderRequestsSection(el, 'PettyCash');
   if(state.section==='potracker') return renderPoTracker(el);
   if(state.section==='sales'){
-    if(accessTier(curRole())!=='SuperAdmin'){ el.innerHTML='<div class="empty">The Sales Dashboard is available to Super Admins only.</div>'; return; }
+    if(salesRole()==='none'){ el.innerHTML='<div class="empty">You don\u2019t have access to the Sales Dashboard.</div>'; return; }
     return renderSales(el);
   }
   if(state.section==='membership') return renderMembership(el);
@@ -2186,9 +2204,20 @@ const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'
 function salesBranchOf(s){ return s.branch || ''; }
 
 function renderSales(el){
-  if(!state.salesTab) state.salesTab = 'overview';
+  const sr = salesRole();
+  const canEdit = sr==='full';
   if(!state.salesArea) state.salesArea = 'core';
-  const isSuper = accessTier(curRole())==='SuperAdmin';
+
+  // Admins: view-only, and only the "Sales by Admin" report — no area switch, no other tabs.
+  if(sr==='admin'){
+    state.salesArea='core'; state.salesTab='admin';
+    const body=document.createElement('div'); el.appendChild(body);
+    try{ return renderAdminReport(body); }
+    catch(err){ console.error('Sales view error:', err); body.innerHTML='<div class="empty">Could not load this view.</div>'; }
+    return;
+  }
+
+  if(!state.salesTab) state.salesTab = 'overview';
 
   // Top-level area switch: Core Services vs Drinks & Merchandise
   const areaBar = document.createElement('div');
@@ -2208,7 +2237,7 @@ function renderSales(el){
     catch(err){ console.error('Merch view error:', err); body.innerHTML='<div class="empty">Could not load this view.</div>'; return; }
   }
 
-  // Tab bar (Core Services)
+  // Tab bar (Core Services). View reports for everyone; upload/entries/imports only for editors.
   const tabs = document.createElement('div'); tabs.className='toolbar'; tabs.style.marginBottom='18px';
   const tabDefs = [
     {k:'overview', l:'Overview'},
@@ -2216,10 +2245,13 @@ function renderSales(el){
     {k:'category', l:'Sales by Category'},
     {k:'item', l:'Sales by Item'},
     {k:'admin', l:'Sales by Admin'},
-    {k:'upload', l:'Upload POS report'},
-    {k:'entries', l:'Entries'},
   ];
-  if(isSuper) tabDefs.push({k:'batches', l:'Manage imports'});
+  if(canEdit){
+    tabDefs.push({k:'upload', l:'Upload POS report'});
+    tabDefs.push({k:'entries', l:'Entries'});
+    tabDefs.push({k:'batches', l:'Manage imports'});
+  }
+  if(!tabDefs.some(t=>t.k===state.salesTab)) state.salesTab='overview';
   tabDefs.forEach(t=>{
     const b = document.createElement('button');
     b.className = 'btn' + (state.salesTab===t.k?' primary':'');
@@ -2475,6 +2507,7 @@ function chartOpts(){
 
 // ---------- UPLOAD POS REPORT ----------
 function renderSalesUpload(el){
+  if(!canEditSales()){ const n=document.createElement('div'); n.className='empty'; n.textContent='Uploading POS reports is restricted. You have view-only access to the Sales Dashboard.'; el.appendChild(n); return; }
   const intro = document.createElement('div'); intro.className='notice';
   intro.innerHTML = 'Upload the POS <strong>“Sales Summary by Category”</strong> CSV export after your shift. The system reads the date, staff, and each line, maps them to your tracker categories, and skips merchandise/drinks. You review before anything is saved.';
   el.appendChild(intro);
@@ -3597,7 +3630,7 @@ function renderAdminReport(host){
 
   // Per-admin vs quota. When a single month is selected, the Quota cell is editable.
   const tcard=sectionCard(host,'Per-admin vs quota \u2014 '+plabel);
-  const editable = P.kind==='month';
+  const editable = (P.kind==='month') && canEditSales();
   const t=document.createElement('table'); t.className='simple'; t.style.width='100%';
   t.innerHTML='<thead><tr><th>Admin</th><th style="text-align:right">Sales</th><th style="text-align:right">Quota</th><th style="text-align:right">Attainment</th><th style="text-align:right">Over/Under</th><th style="text-align:right">Share</th></tr></thead>';
   const tb=document.createElement('tbody');
@@ -3678,7 +3711,8 @@ function renderAdminReport(host){
   mrows.push(['Team', ...colTot.map(v=>money(v)), money(colTot.reduce((a,b)=>a+b,0))]);
   tableFrom(mcard, ['Admin', ...mnames, 'Total'], mrows);
 
-  // --- Editable quota grid (all admins x months) ---
+  // --- Editable quota grid (all admins x months) — editors only ---
+  if(canEditSales()){
   const qcard=sectionCard(host,'Set monthly quota per admin');
   const qhint=document.createElement('div'); qhint.className='hint'; qhint.style.marginBottom='10px';
   qhint.textContent='Type a quota for any admin and month. Saved in this browser and applied to attainment above. Blank = tracker default.';
@@ -3703,6 +3737,7 @@ function renderAdminReport(host){
   const rstBtn=document.createElement('button'); rstBtn.className='btn'; rstBtn.textContent='Reset to tracker defaults'; rstBtn.style.marginTop='10px';
   rstBtn.onclick=()=>{ if(typeof confirm==='undefined' || confirm('Clear all manual quota edits saved in this browser?')){ try{ if(typeof localStorage!=='undefined') localStorage.removeItem(ADMIN_QUOTA_LS_KEY); }catch(e){} state.adminQuotaOverrides=null; render(); } };
   qcard.appendChild(rstBtn);
+  } // end editors-only quota grid
 
   const note=document.createElement('div'); note.className='notice';
   note.textContent='Sales by Admin: Jan\u2013Jun from the tracker xlsx, July from the July POS files, and August onward from uploaded per-admin POS reports (matched by staff name). Branch reflects each admin\u2019s home branch.';
