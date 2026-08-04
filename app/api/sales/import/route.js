@@ -6,14 +6,10 @@ const pos = require('../../../../lib/pos.js');
 export const dynamic = 'force-dynamic';
 
 // Admin -> branch (each admin belongs to one branch). Overridable per request.
-const ADMIN_BRANCH = {
-  emman: 'Manila', andre: 'Manila',
-  francis: 'Malabon', loraine: 'Malabon',
-};
 function branchForStaffName(name) {
   const n = (name || '').toLowerCase();
-  if (/emman|andre/.test(n)) return 'Manila';
-  if (/francis|loraine/.test(n)) return 'Malabon';
+  if (/emman|andre|mica|michaela|ela\b/.test(n)) return 'Manila';
+  if (/francis|loraine|kloe/.test(n)) return 'Malabon';
   return '';
 }
 
@@ -55,12 +51,26 @@ export const POST = withApi(async (req) => {
   }
 
   const lines = [];
-  let keptSum = 0;
-  let excludedSum = 0;
+  let keptSum = 0;     // core services
+  let merchSum = 0;    // drinks & merchandise (now imported, tracked separately)
   for (const L of parsed.lines) {
-    if (pos.isExcludedAvailment(L.availment)) {
-      excludedSum += L.amount;
-      continue; // merchandise/drinks are not sales
+    // isExcludedLine keeps keyfob/access-card as a real sale; true only for actual drinks/products.
+    if (pos.isExcludedLine(L.availment, L.item)) {
+      merchSum += L.amount;
+      lines.push({
+        availment: L.availment,
+        item: L.item,
+        qty: L.qty,
+        amount: L.amount,
+        category: 'Drinks & Merchandise',
+        discipline: '',
+        note: 'Merchandise',
+        unmapped: false,
+        needsKind: false,
+        saleKind: '',
+        isMerch: true,
+      });
+      continue;
     }
     const m = pos.mapItem(L.item);
     const isSub = pos.isSubscriptionAvailment(L.availment);
@@ -82,14 +92,14 @@ export const POST = withApi(async (req) => {
     }
   }
 
-  // Grand-total validation: kept + excluded should equal the file's GRAND TOTAL.
+  // Grand-total validation: core + merch should equal the file's GRAND TOTAL.
   if (parsed.grandTotal != null) {
-    const diff = Math.abs((keptSum + excludedSum) - parsed.grandTotal);
+    const diff = Math.abs((keptSum + merchSum) - parsed.grandTotal);
     if (diff > 1) {
-      warnings.push(`The line items add up to ${(keptSum + excludedSum).toFixed(2)} but the file's GRAND TOTAL is ${parsed.grandTotal.toFixed(2)} — the file may be incomplete.`);
+      warnings.push(`The line items add up to ${(keptSum + merchSum).toFixed(2)} but the file's GRAND TOTAL is ${parsed.grandTotal.toFixed(2)} — the file may be incomplete.`);
     }
   }
-  if (!lines.length) warnings.push('No sales lines to import (after excluding merchandise). Nothing would be saved.');
+  if (!lines.length) warnings.push('No lines to import — nothing would be saved.');
 
   const branch = branchForStaffName(parsed.staff);
   if (!branch && parsed.staff) warnings.push(`Couldn't match "${parsed.staff}" to a branch — pick one before importing.`);
@@ -101,7 +111,8 @@ export const POST = withApi(async (req) => {
       branch,
       grandTotal: parsed.grandTotal,
       keptSum,
-      excludedSum,
+      merchSum,
+      excludedSum: merchSum, // kept for backward compatibility with the current UI label
       lines,
       warnings,
     },
