@@ -778,9 +778,23 @@ function renderChecklistView(el){
     {label:'Weekly tasks — week of ' + fmtDate(state.checklist.weekStart), freq:'Weekly'},
   ];
   let shownAny = false;
+  const phaseRank = (sec)=>{ const s=(sec||'').toLowerCase();
+    if(s.includes('opening')) return 0;
+    if(s.includes('during')) return 1;
+    if(s.includes('closing')) return 2;
+    return sec ? 3 : 4; };
   groups.forEach(g=>{
-    const list = entries.filter(e=>e.frequency===g.freq && matchesFilter(e));
+    let list = entries.filter(e=>e.frequency===g.freq && matchesFilter(e));
     if(!list.length) return;
+    // Group by phase (Opening → During → Closing → other → none) so tasks added
+    // to a phase join that phase instead of landing at the bottom. Stable within a section.
+    list = list.map((t,i)=>({t,i})).sort((a,b)=>{
+      const ra=phaseRank(a.t.section), rb=phaseRank(b.t.section);
+      if(ra!==rb) return ra-rb;
+      const sa=(a.t.section||'').toLowerCase(), sb=(b.t.section||'').toLowerCase();
+      if(sa!==sb) return sa<sb?-1:1;
+      return a.i-b.i;
+    }).map(x=>x.t);
     shownAny = true;
     const h = document.createElement('div'); h.className='section-head'; h.innerHTML = `<h2>${g.label}</h2>`;
     el.appendChild(h);
@@ -2562,7 +2576,7 @@ function renderPosPreview(host, preview){
         <option value="Malabon" ${preview.branch==='Malabon'?'selected':''}>Malabon</option>
       </select></div>
     </div>
-    <div class="hint" style="margin-top:6px;">Sales to import: <strong>${fmtMoney(preview.keptSum)}</strong> · excluded merchandise/drinks: ${fmtMoney(preview.excludedSum)} · POS grand total: ${preview.grandTotal!=null?fmtMoney(preview.grandTotal):'—'}</div>
+    <div class="hint" style="margin-top:6px;">Core services: <strong>${fmtMoney(preview.keptSum)}</strong> · drinks &amp; merchandise (to merch dashboard): ${fmtMoney(preview.merchSum!=null?preview.merchSum:preview.excludedSum)} · POS grand total: ${preview.grandTotal!=null?fmtMoney(preview.grandTotal):'—'}</div>
   `;
   host.appendChild(head);
 
@@ -2832,9 +2846,17 @@ function adminTargetFor(name, monthNum){
   return idx>=0 ? (Number(d.target[idx])||0) : 0;
 }
 // Match a POS "Staff" / entered_by value to one of our admin short names.
-// Most-specific tokens first so "Michaela..." maps to Mica, not Ela.
-const ADMIN_NAME_TOKENS = { Mica:['michaela','mica'], Emman:['emmannoel','emman'], Andre:['andre'],
-  Loraine:['loraine'], Kloe:['kloe'], Francis:['francis'], Ela:['ela'] };
+// Includes full names/surnames used in the POS exports. Most-specific first so
+// "Michaela..." maps to Mica (not Ela via the "ela" in Marinela).
+const ADMIN_NAME_TOKENS = {
+  Mica:    ['michaela','mica','fernandez'],
+  Emman:   ['emmannoel','emmanoel','emman','dichosa'],
+  Andre:   ['mheki','cortez','andre'],
+  Loraine: ['loraine','parole'],
+  Kloe:    ['kloe','africa'],
+  Francis: ['francis'],
+  Ela:     ['marinela','bonganay','ela'],
+};
 function adminOfName(enteredBy){
   const s=(enteredBy||'').trim().toLowerCase(); if(!s) return null;
   for(const name of Object.keys(ADMIN_PERF_2026.admins)){ if(s===name.toLowerCase()) return name; }
