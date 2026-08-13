@@ -5,6 +5,7 @@ const SECTIONS = [
   {key:'potracker', label:'PO tracker', sub:'PO, check payment, and delivery receipt matched automatically.'},
   {key:'sales', label:'Sales Dashboard', sub:'Revenue reports, targets, and admin performance.'},
   {key:'membership', label:'Membership tracker', sub:'Active, expiring, and expired memberships.'},
+  {key:'trialbooking', label:'FREE Trial Booking', sub:'Online free-trial registrations — approve, reschedule, and send day passes.'},
 ];
 
 let state = {
@@ -18,6 +19,11 @@ let state = {
   tasks: [],
   sales: [],
   members: [],
+  trialBookings: [],
+  trialFilter: 'All',
+  trialBranch: 'All',
+  trialSearch: '',
+  trialQr: null,
   search: '',
   taskFilterDate: todayStr(),
   taskFilterAssignee: 'All',
@@ -219,7 +225,7 @@ function inDateRange(dateStr, from, to){
   if(to && d > to) return false;
   return true;
 }
-function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null}; }
+function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null, tshirtReleasedDate:m.tshirt_released_date||'', keyfobReleasedDate:m.keyfob_released_date||'', memberNo:m.member_no||'', needsReview:!!m.needs_review}; }
 function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
 
 function upsertRequest(mapped){
@@ -249,6 +255,9 @@ async function loadAll(){
     // Sales targets power the actual-vs-target charts. Load separately so a
     // missing table (before its migration runs) doesn't break the whole app.
     try{ const t = await apiGet('/api/sales/targets'); state.targets = t.targets||[]; }catch(e){ state.targets = []; }
+    // Trial bookings load separately too, so a pending migration doesn't break the app.
+    try{ const tb = await apiGet('/api/trial-bookings'); state.trialBookings = (tb.bookings||[]).map(mapTrialBooking); }catch(e){ state.trialBookings = []; }
+    try{ state.trialQr = await apiGet('/api/trial-qr'); }catch(e){ state.trialQr = {exists:false}; }
   }catch(e){
     // Could be an expired session — but could also be a real server error
     // (e.g. a pending database migration). Surface it on the login screen
@@ -423,6 +432,7 @@ function renderContent(){
     return renderSales(el);
   }
   if(state.section==='membership') return renderMembership(el);
+  if(state.section==='trialbooking') return renderTrialBooking(el);
   if(state.section==='repository'){ state.section='potracker'; return renderPoTracker(el); }
 }
 
@@ -4011,7 +4021,7 @@ const PLAN_MONTHS = {'Monthly':1, 'Quarterly':3, 'Annual':12, 'Class pack':0};
 function memberStatus(m){
   const days = daysBetween(todayStr(), m.expiryDate);
   if(days < 0) return 'Expired';
-  if(days <= 7) return 'Expiring soon';
+  if(days <= 14) return 'Expiring soon';
   return 'Active';
 }
 
@@ -4026,12 +4036,14 @@ function renderMembership(el){
   },0);
 
   const missingForm = state.members.filter(m=>!m.formPath).length;
+  const needsReview = state.members.filter(m=>m.needsReview).length;
   const metrics = document.createElement('div'); metrics.className='metrics';
   metrics.innerHTML = `
     <div class="metric good"><div class="num">${active}</div><div class="lbl">Active members</div></div>
-    <div class="metric ${expiringSoon>0?'flag':''}"><div class="num">${expiringSoon}</div><div class="lbl">Expiring within 7 days</div></div>
+    <div class="metric ${expiringSoon>0?'flag':''}"><div class="num">${expiringSoon}</div><div class="lbl">Expiring within 2 weeks</div></div>
     <div class="metric"><div class="num">${expired}</div><div class="lbl">Expired</div></div>
-    <div class="metric ${missingForm>0?'flag':''}"><div class="num">${missingForm}</div><div class="lbl">Missing membership form</div></div>
+    <div class="metric ${needsReview>0?'flag':''}"><div class="num">${needsReview}</div><div class="lbl">Needs review</div></div>
+    <div class="metric"><div class="num">${missingForm}</div><div class="lbl">Missing membership form</div></div>
     <div class="metric"><div class="num">${fmtMoney(monthRevenue).replace('PHP ','')}</div><div class="lbl">Revenue this month (PHP)</div></div>
   `;
   el.appendChild(metrics);
@@ -4044,6 +4056,7 @@ function renderMembership(el){
     <option value="Active" ${state.memberFilter==='Active'?'selected':''}>Active</option>
     <option value="Expiring soon" ${state.memberFilter==='Expiring soon'?'selected':''}>Expiring soon</option>
     <option value="Expired" ${state.memberFilter==='Expired'?'selected':''}>Expired</option>
+    <option value="Needs review" ${state.memberFilter==='Needs review'?'selected':''}>Needs review</option>
   </select>`;
   head.appendChild(toolbar);
   const exportBtn=document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
@@ -4062,8 +4075,12 @@ function renderMembership(el){
       'Membership status': m.computed,
       'Amount (PHP)': m.amount,
       'T-shirt size': m.tshirtSize||'',
+      'T-shirt released': m.tshirtReleasedDate||'',
+      'Keyfob released': m.keyfobReleasedDate||'',
+      'Member no.': m.memberNo||'',
       'Source': m.source||'',
       'Remarks': m.remarks||'',
+      'Needs review': m.needsReview?'Yes':'',
       'Form on file': m.formPath?'Yes':'NO',
       'Form uploaded by': m.formUploadedBy||'',
       'Added by': m.createdBy||'',
@@ -4076,7 +4093,7 @@ function renderMembership(el){
   };
   toolbar.appendChild(exportBtn);
   if(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin'){
-    const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ New member';
+    const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ Upload new member';
     b.onclick=()=>{ state.modal={type:'newMember'}; render(); };
     toolbar.appendChild(b);
   }
@@ -4084,7 +4101,8 @@ function renderMembership(el){
   toolbar.querySelector('#member-filter').onchange=(e)=>{ state.memberFilter=e.target.value; renderContent(); };
 
   let list = withStatus;
-  if(state.memberFilter!=='All') list = list.filter(m=>m.computed===state.memberFilter);
+  if(state.memberFilter==='Needs review') list = list.filter(m=>m.needsReview);
+  else if(state.memberFilter!=='All') list = list.filter(m=>m.computed===state.memberFilter);
   list.sort((a,b)=> a.expiryDate.localeCompare(b.expiryDate));
 
   if(list.length===0){
@@ -4094,11 +4112,11 @@ function renderMembership(el){
   list.forEach(m=>{
     const card = document.createElement('div'); card.className='card';
     const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
-    const subBits = [m.contact||'—', m.branch||null, m.plan, 'expires '+fmtDate(m.expiryDate), m.tshirtSize?('shirt '+m.tshirtSize):null, m.source||null].filter(Boolean).map(escapeHtml);
+    const subBits = [m.contact||'—', m.branch||null, m.memberNo?('#'+m.memberNo):null, m.plan, 'expires '+fmtDate(m.expiryDate), m.tshirtSize?('shirt '+m.tshirtSize):null, m.source||null].filter(Boolean).map(escapeHtml);
     card.innerHTML = `
       <div class="req-top">
         <div>
-          <div class="req-title">${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge flag">no form on file</span>'}</div>
+          <div class="req-title">${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge neutral">no form on file</span>'} ${m.needsReview?'<span class="badge flag">needs review</span>':''}</div>
           <div class="req-sub">${subBits.join(' &middot; ')}</div>
         </div>
         <span class="badge ${badgeClass}">${m.computed}</span>
@@ -4168,241 +4186,284 @@ async function compressImageFile(file, maxDim = 2000, quality = 0.82){
   }
 }
 
+const MEMBER_SOURCE_OPTIONS = ['Walk-in','Online Inquiries','Referral','Old Client','Facebook','Other'];
+const MEMBER_TSHIRT_OPTIONS = ['Small','Medium','Large','XL','XXL'];
+
+// Required fields for a row before it can be uploaded — mirrors
+// lib/members.js validateMemberRow() server-side (kept in sync manually;
+// app.js is a plain script, not an ES module, so it can't import that file).
+function memberRowMissingFields(r){
+  const missing = [];
+  if(!r.name) missing.push('name');
+  if(!r.branch) missing.push('branch');
+  if(!r.startDate) missing.push('membership date');
+  if(!r.tshirtSize) missing.push('t-shirt size');
+  if(!r.source) missing.push('source');
+  if(!(Number(r.amount) > 0)) missing.push('amount paid');
+  if(!r.tshirtReleasedDate) missing.push('t-shirt released date');
+  if(r.branch==='Malabon' && !r.keyfobReleasedDate) missing.push('keyfob released date');
+  return missing;
+}
+
+// "Upload New Member" — the only way to add members now. Pick the day's POS
+// report, map its columns, fill in the details a POS export won't carry
+// (t-shirt/keyfob/source), check for duplicates, then save. No scanned form
+// here anymore — the report is the record (scans, if kept, live elsewhere).
 function renderNewMemberModal(modal){
-  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">New member</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Upload new member</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
   const wrap = document.createElement('div');
-  wrap.innerHTML = `
-    <div class="notice">Step 1: attach the scanned membership form (PNG, JPG, or PDF) — <strong>required</strong>. The system will read it and fill in what it can; review and correct the details, then save.</div>
-    <div class="field full"><label>Membership form (scan or photo) — required</label><input id="m-form-file" type="file" accept="image/png,image/jpeg,application/pdf"></div>
-    <div id="m-form-preview" style="display:none;margin:0 0 12px;"></div>
-    <div class="action-row" style="margin:2px 0 14px;">
-      <button class="btn sm" id="m-scan-btn" type="button">🔍 Re-scan form</button>
-      <span class="hint" id="m-scan-status"></span>
-    </div>
-    <div class="form-grid">
-      <div class="field full"><label>Name</label><input id="m-name" placeholder="Full name"></div>
-      <div class="field"><label>Contact</label><input id="m-contact" placeholder="Phone or email"></div>
-      <div class="field"><label>Branch</label><select id="m-branch"><option>Manila</option><option>Malabon</option></select></div>
-      <div class="field"><label>Status</label><select id="m-status"><option>New</option><option>Renew</option></select></div>
-      <div class="field"><label>Plan</label><select id="m-plan">${Object.keys(PLAN_MONTHS).map(p=>`<option value="${p}" ${p==='Annual'?'selected':''}>${p}</option>`).join('')}</select></div>
-      <div class="field"><label>Start date</label><input id="m-start" type="date" value="${todayStr()}"></div>
-      <div class="field"><label>Amount paid (PHP)</label><input id="m-amount" type="number" min="0" step="0.01" value="600" placeholder="0.00"></div>
-      <div class="field"><label>T-shirt size</label><select id="m-tshirt"><option value="">—</option><option>Small</option><option>Medium</option><option>Large</option><option>XL</option><option>XXL</option></select></div>
-      <div class="field"><label>Source</label><select id="m-source"><option value="">—</option><option>Walk-in</option><option>Online Inquiries</option><option>Referral</option><option>Old Client</option><option>Facebook</option><option>Other</option></select></div>
-      <div class="field full"><label>Remarks (optional)</label><input id="m-remarks" placeholder="e.g. with pic, done text"></div>
-    </div>
-    <div id="m-error"></div>
-  `;
   modal.appendChild(wrap);
 
-  // --- OCR auto-fill: runs automatically when a file is chosen ---
-  // (Printed text reads well; handwriting is best-effort — always review.)
-  const scanBtn = wrap.querySelector('#m-scan-btn');
-  const scanStatus = wrap.querySelector('#m-scan-status');
-  // Holds the (possibly compressed) file that will actually be saved.
-  let memberFormFile = null;
-  const setVal = (id, v)=>{
-    if(v!=null && String(v).trim()!==''){
-      const el=document.getElementById(id);
-      if(el){
-        el.value = v;
-        // Mark as machine-filled so the admin knows to verify it against the
-        // scan. The highlight clears the moment they edit the field.
-        el.classList.add('ai-filled');
-        el.addEventListener('input', ()=>el.classList.remove('ai-filled'), {once:true});
-        el.addEventListener('change', ()=>el.classList.remove('ai-filled'), {once:true});
-        return 1;
-      }
-    }
-    return 0;
-  };
+  let rawRows = [];
+  let headers = [];
+  let rows = [];
 
-  const showPreview = (file)=>{
-    const pv = wrap.querySelector('#m-form-preview');
-    pv.innerHTML = ''; pv.style.display = '';
-    if(file.type === 'application/pdf'){
-      pv.innerHTML = '<div class="hint">PDF attached: ' + escapeHtml(file.name) + ' — open it beside this window to compare while reviewing.</div>';
-      return;
-    }
-    const img = document.createElement('img');
-    img.src = URL.createObjectURL(file);
-    img.style.cssText = 'max-width:100%;max-height:340px;border:1px solid var(--line);border-radius:8px;display:block;';
-    img.title = 'Compare the handwriting here against the highlighted fields below';
-    const cap = document.createElement('div'); cap.className='hint'; cap.style.marginTop='6px';
-    cap.textContent = 'Compare the form against the highlighted fields below — highlights clear as you confirm/edit each one.';
-    pv.appendChild(img); pv.appendChild(cap);
-  };
+  function fmtCellDate(v){
+    if(v instanceof Date && !isNaN(v)) return v.getFullYear()+'-'+String(v.getMonth()+1).padStart(2,'0')+'-'+String(v.getDate()).padStart(2,'0');
+    const s = String(v==null?'':v).trim();
+    if(!s) return '';
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if(m) return m[0];
+    const d = new Date(s);
+    if(!isNaN(d)) return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    return '';
+  }
+  function normBranch(v){
+    const s = String(v==null?'':v).toLowerCase();
+    if(s.includes('malabon')) return 'Malabon';
+    if(s.includes('manila')) return 'Manila';
+    return String(v==null?'':v).trim();
+  }
 
-  const aiScan = async (file)=>{
-    // Try the server-side AI reader first (reads handwriting well).
-    if(file.size > UPLOAD_LIMIT_BYTES){
-      throw new Error('This file is ' + (file.size/1024/1024).toFixed(1) + 'MB — too large to read (limit 4MB).');
-    }
-    scanStatus.textContent = 'Reading the form with AI\u2026 usually 5\u201315 seconds.';
-    const fd = new FormData(); fd.append('file', file);
-    const res = await fetch('/api/members/scan', {method:'POST', body:fd});
-    if(res.status === 413){
-      throw new Error('The file is too large for the reader (limit about 4MB).');
-    }
-    const data = await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(data.error || 'AI reading failed.');
-    if(!data.available) return null; // no API key configured \u2014 caller falls back
-    const f = data.fields || {};
-    let filled = 0;
-    const nameV = [f.firstName, f.lastName].filter(Boolean).join(' ');
-    filled += setVal('m-name', nameV || null);
-    const contactV = [f.contactNumber, f.email].filter(Boolean).join(' / ');
-    filled += setVal('m-contact', contactV || null);
-    filled += setVal('m-start', f.startDate || null);
-    if(f.branch === 'Manila' || f.branch === 'Malabon'){ document.getElementById('m-branch').value = f.branch; document.getElementById('m-branch').classList.add('ai-filled'); filled++; }
-    if(f.source){ const sel = document.getElementById('m-source'); if([...sel.options].some(o=>o.value===f.source)){ sel.value = f.source; sel.classList.add('ai-filled'); filled++; } }
-    if(f.tshirtSize){ const ts = document.getElementById('m-tshirt'); if([...ts.options].some(o=>o.value===f.tshirtSize)){ ts.value = f.tshirtSize; ts.classList.add('ai-filled'); filled++; } }
-    // Address and gender aren't dedicated fields — keep them in remarks so the
-    // detail from the form isn't lost.
-    const extras = [];
-    if(f.address) extras.push('Address: ' + f.address);
-    if(f.gender) extras.push('Gender: ' + f.gender);
-    if(f.staffRep) extras.push('Processed by: ' + f.staffRep);
-    if(extras.length){ const rEl = document.getElementById('m-remarks'); if(rEl && !rEl.value) { rEl.value = extras.join(' · '); rEl.classList.add('ai-filled'); } }
-    return filled;
-  };
+  function showStep1(){
+    wrap.innerHTML = `
+      <div class="notice">Upload the day's POS report (Excel or CSV) with the new membership entries for the day. You'll match its columns, fill in the required details per member, then save.</div>
+      <div class="field full"><label>POS report file</label><input id="mb-file" type="file" accept=".xlsx,.xls,.csv"></div>
+      <div id="mb-file-error"></div>
+    `;
+    wrap.querySelector('#mb-file').onchange = handleFile;
+  }
 
-  const basicScan = async (file)=>{
-    // Fallback: on-device OCR (printed labels read fine; handwriting is best-effort).
-    if(file.type === 'application/pdf'){ scanStatus.textContent = 'The basic reader works on images only \u2014 the PDF will still be saved as the form copy. Fill the fields manually, or configure the AI reader for PDFs.'; return null; }
-    if(typeof Tesseract === 'undefined'){
-      await new Promise((res, rej)=>{
-        const s = document.createElement('script');
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js';
-        s.onload = res; s.onerror = ()=>rej(new Error('Could not load the text reader. Check your internet connection.'));
-        document.head.appendChild(s);
-      });
-    }
-    scanStatus.textContent = 'Reading the form\u2026 this can take ~20 seconds.';
-    const result = await Tesseract.recognize(file, 'eng');
-    const text = (result && result.data && result.data.text) || '';
-    const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
-    let filled = 0;
-    const grab = (labels)=>{
-      for(const line of lines){
-        for(const lab of labels){
-          const rx = new RegExp('^\\s*' + lab + '\\s*[:\\-]?\\s*(.+)$', 'i');
-          const m = line.match(rx);
-          if(m && m[1] && m[1].trim().length > 1) return m[1].trim();
-        }
-      }
-      return null;
+  async function handleFile(e){
+    const file = e.target.files[0];
+    if(!file) return;
+    const errEl = wrap.querySelector('#mb-file-error'); errEl.innerHTML='';
+    if(typeof XLSX==='undefined'){ errEl.innerHTML = '<div class="notice err">The spreadsheet library did not load. Refresh the page and try again.</div>'; return; }
+    try{
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array', cellDates:true});
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      rawRows = XLSX.utils.sheet_to_json(sheet, {defval:''});
+      if(!rawRows.length){ errEl.innerHTML = '<div class="notice err">No rows found in the first sheet of that file.</div>'; return; }
+      headers = Object.keys(rawRows[0]);
+      showStep2();
+    }catch(err){ errEl.innerHTML = `<div class="notice err">${escapeHtml(err.message || 'Could not read that file.')}</div>`; }
+  }
+
+  const GUESS = {
+    name: /name/i, branch: /branch/i, date: /date/i, amount: /amount|paid|price/i,
+    status: /status|new.*renew/i, source: /source/i, memberNo: /member.*(no|id|#)|member.?number/i, contact: /mobile|contact|phone|e-?mail/i,
+  };
+  const guessCol = (re)=> headers.find(h=>re.test(h)) || '';
+
+  function showStep2(){
+    const opts = (sel)=> '<option value="">— none —</option>' + headers.map(h=>`<option value="${escapeHtml(h)}" ${h===sel?'selected':''}>${escapeHtml(h)}</option>`).join('');
+    wrap.innerHTML = `
+      <div class="notice">Found ${rawRows.length} row(s). Match the report's columns to these fields — the ones with * are needed to build the member list; the rest can be filled in per row on the next step.</div>
+      <div class="form-grid">
+        <div class="field"><label>Name *</label><select id="map-name">${opts(guessCol(GUESS.name))}</select></div>
+        <div class="field"><label>Branch *</label><select id="map-branch">${opts(guessCol(GUESS.branch))}</select></div>
+        <div class="field"><label>Membership date *</label><select id="map-date">${opts(guessCol(GUESS.date))}</select></div>
+        <div class="field"><label>Amount paid</label><select id="map-amount">${opts(guessCol(GUESS.amount))}</select></div>
+        <div class="field"><label>Membership status (New/Renew)</label><select id="map-status">${opts(guessCol(GUESS.status))}</select></div>
+        <div class="field"><label>Source</label><select id="map-source">${opts(guessCol(GUESS.source))}</select></div>
+        <div class="field"><label>Member no.</label><select id="map-memberNo">${opts(guessCol(GUESS.memberNo))}</select></div>
+        <div class="field"><label>Contact</label><select id="map-contact">${opts(guessCol(GUESS.contact))}</select></div>
+      </div>
+      <div id="mb-map-error"></div>
+      <div class="action-row">
+        <button class="btn ghost" id="mb-back1" type="button">&larr; Choose a different file</button>
+        <button class="btn primary" id="mb-map-next" type="button">Continue</button>
+      </div>
+    `;
+    wrap.querySelector('#mb-back1').onclick = showStep1;
+    wrap.querySelector('#mb-map-next').onclick = buildRows;
+  }
+
+  function buildRows(){
+    const get = (id)=>wrap.querySelector('#'+id).value;
+    const cName=get('map-name'), cBranch=get('map-branch'), cDate=get('map-date'), cAmount=get('map-amount'),
+          cStatus=get('map-status'), cSource=get('map-source'), cMemberNo=get('map-memberNo'), cContact=get('map-contact');
+    const errEl = wrap.querySelector('#mb-map-error'); errEl.innerHTML='';
+    if(!cName || !cBranch || !cDate){ errEl.innerHTML = '<div class="notice err">Name, Branch, and Membership date must be matched to a column to continue.</div>'; return; }
+    rows = rawRows.map((r,i)=>({
+      _key:i,
+      name: String(r[cName]==null?'':r[cName]).trim(),
+      branch: normBranch(r[cBranch]),
+      startDate: fmtCellDate(r[cDate]),
+      amount: cAmount ? (parseFloat(r[cAmount])||0) : 600,
+      status: (cStatus && /renew/i.test(String(r[cStatus]))) ? 'Renew' : 'New',
+      source: cSource ? String(r[cSource]==null?'':r[cSource]).trim() : '',
+      memberNo: cMemberNo ? String(r[cMemberNo]==null?'':r[cMemberNo]).trim() : '',
+      contact: cContact ? String(r[cContact]==null?'':r[cContact]).trim() : '',
+      tshirtSize:'', tshirtReleasedDate:'', keyfobReleasedDate:'',
+      skip:false, dup:null, removed:false,
+    })).filter(r=>r.name);
+    if(!rows.length){ errEl.innerHTML = '<div class="notice err">No rows had a name in the matched column — check your column choices.</div>'; return; }
+    showStep3();
+  }
+
+  function rowHtml(r, idx){
+    const dupBadge = r.dup ? `<div class="hint" style="color:var(--red-ink);">Existing: ${escapeHtml(r.dup.id)}, expires ${escapeHtml(fmtDate(r.dup.expiryDate)||'')}</div>
+      <label class="hint" style="display:block;"><input type="checkbox" class="f-skip" ${r.skip?'checked':''}> Skip this row</label>` : '';
+    return `
+      <tr data-idx="${idx}">
+        <td>${idx+1}</td>
+        <td><input class="f-name" value="${escapeHtml(r.name)}" style="width:150px;"></td>
+        <td><select class="f-branch"><option ${r.branch==='Manila'?'selected':''}>Manila</option><option ${r.branch==='Malabon'?'selected':''}>Malabon</option></select></td>
+        <td><input class="f-date" type="date" value="${r.startDate||''}" style="width:135px;"></td>
+        <td><input class="f-amount" type="number" min="0" step="0.01" value="${r.amount}" style="width:85px;"></td>
+        <td><select class="f-status"><option ${r.status==='New'?'selected':''}>New</option><option ${r.status==='Renew'?'selected':''}>Renew</option></select></td>
+        <td><select class="f-source"><option value="">—</option>${MEMBER_SOURCE_OPTIONS.map(s=>`<option ${r.source===s?'selected':''}>${s}</option>`).join('')}</select></td>
+        <td><select class="f-tshirt"><option value="">—</option>${MEMBER_TSHIRT_OPTIONS.map(s=>`<option ${r.tshirtSize===s?'selected':''}>${s}</option>`).join('')}</select></td>
+        <td><input class="f-tshirtdate" type="date" value="${r.tshirtReleasedDate||''}" style="width:135px;"></td>
+        <td class="keyfob-cell" style="display:${r.branch==='Malabon'?'':'none'};"><input class="f-keyfobdate" type="date" value="${r.keyfobReleasedDate||''}" style="width:135px;"></td>
+        <td class="keyfob-na" style="display:${r.branch==='Malabon'?'none':''};color:var(--ink-2);">N/A</td>
+        <td><input class="f-memberno" value="${escapeHtml(r.memberNo)}" style="width:90px;"></td>
+        <td><input class="f-contact" value="${escapeHtml(r.contact)}" style="width:130px;"></td>
+        <td>${dupBadge}</td>
+        <td><button class="btn sm ghost f-remove" type="button">&times;</button></td>
+      </tr>
+    `;
+  }
+
+  function wireRow(tr, idx){
+    const r = rows[idx];
+    const on = (sel, prop, parse)=>{
+      const el = tr.querySelector(sel);
+      if(!el) return;
+      el.addEventListener('change', ()=>{ r[prop] = parse ? parse(el.value) : el.value; });
+      el.addEventListener('input', ()=>{ r[prop] = parse ? parse(el.value) : el.value; });
     };
-    const lastName = grab(['last name']);
-    const firstName = grab(['first name']);
-    let nameV = (firstName || lastName) ? [firstName, lastName].filter(Boolean).join(' ') : grab(['full name','member name','name']);
-    filled += setVal('m-name', nameV);
-    const phoneV = grab(['contact number','contact no','contact','mobile','phone','cellphone','cp no']) ||
-      (text.match(/09\d{9}|\+639\d{9}/) || [null])[0];
-    const emailV = grab(['email address','email']) ||
-      (text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/) || [null])[0];
-    filled += setVal('m-contact', [phoneV, emailV].filter(Boolean).join(' / ') || null);
-    return filled;
-  };
+    on('.f-name','name'); on('.f-date','startDate'); on('.f-amount','amount',v=>parseFloat(v)||0);
+    on('.f-status','status'); on('.f-source','source'); on('.f-tshirt','tshirtSize');
+    on('.f-tshirtdate','tshirtReleasedDate'); on('.f-keyfobdate','keyfobReleasedDate');
+    on('.f-memberno','memberNo'); on('.f-contact','contact');
+    const branchSel = tr.querySelector('.f-branch');
+    branchSel.addEventListener('change', ()=>{
+      r.branch = branchSel.value;
+      tr.querySelector('.keyfob-cell').style.display = r.branch==='Malabon' ? '' : 'none';
+      tr.querySelector('.keyfob-na').style.display = r.branch==='Malabon' ? 'none' : '';
+    });
+    const skipEl = tr.querySelector('.f-skip');
+    if(skipEl) skipEl.addEventListener('change', ()=>{ r.skip = skipEl.checked; });
+    tr.querySelector('.f-remove').onclick = ()=>{ r.removed = true; renderGrid(); };
+  }
 
-  const runScan = async ()=>{
-    const fileInput = wrap.querySelector('#m-form-file');
-    const original = fileInput.files[0];
-    if(!original){ scanStatus.textContent = 'Choose the form file first.'; return; }
-    scanBtn.disabled = true;
-    showPreview(original);
+  function renderGrid(){
+    const active = rows.filter(r=>!r.removed);
+    const dupCount = active.filter(r=>r.dup).length;
+    const table = wrap.querySelector('#mb-grid-wrap');
+    table.innerHTML = `
+      <div style="overflow-x:auto;">
+        <table class="simple">
+          <thead><tr>
+            <th>#</th><th>Name</th><th>Branch</th><th>Date</th><th>Amount</th><th>Status</th><th>Source</th>
+            <th>T-shirt size</th><th>T-shirt released</th><th>Keyfob released</th><th></th><th>Member no.</th><th>Contact</th><th>Duplicate</th><th></th>
+          </tr></thead>
+          <tbody>${active.map((r)=>rowHtml(r, rows.indexOf(r))).join('')}</tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:8px;">${active.length} row(s)${dupCount?`, ${dupCount} flagged as possible duplicates`:''}.</div>
+    `;
+    table.querySelectorAll('tbody tr').forEach(tr=>wireRow(tr, Number(tr.dataset.idx)));
+  }
 
-    // Shrink large photos so both the reader and the save request stay under
-    // the upload limit. The compressed copy is what gets stored.
-    let file = original;
-    if(original.type.startsWith('image/') && original.size > UPLOAD_LIMIT_BYTES/2){
-      scanStatus.textContent = 'Optimising the image\u2026';
-      file = await compressImageFile(original);
-    }
-    memberFormFile = file;
+  async function checkDuplicates(){
+    const active = rows.filter(r=>!r.removed);
+    const statusEl = wrap.querySelector('#mb-dup-status');
+    statusEl.textContent = 'Checking for duplicates…';
+    try{
+      const res = await fetch('/api/members/check-duplicates', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ rows: active.map(r=>({name:r.name, branch:r.branch, memberNo:r.memberNo})) }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data.error || 'Duplicate check failed.');
+      active.forEach(r=>{ r.dup = null; });
+      (data.matches||[]).forEach(m=>{
+        const r = active[m.index];
+        if(r){ r.dup = m.existing; r.skip = true; }
+      });
+      statusEl.textContent = data.matches && data.matches.length
+        ? `Found ${data.matches.length} possible duplicate(s) — review below (they're set to Skip by default).`
+        : 'No duplicates found.';
+      renderGrid();
+    }catch(e){ statusEl.textContent = e.message; }
+  }
 
-    if(file.size > UPLOAD_LIMIT_BYTES){
-      scanStatus.textContent = 'This file is ' + (file.size/1024/1024).toFixed(1) + 'MB, over the 4MB limit. ' +
-        (file.type === 'application/pdf'
-          ? 'Re-scan the form as a JPG/PNG photo, or export the PDF at a lower resolution.'
-          : 'Try a lower-resolution scan.');
-      scanBtn.disabled = false;
+  async function saveRows(){
+    const errEl = wrap.querySelector('#mb-save-error'); errEl.innerHTML='';
+    const active = rows.filter(r=>!r.removed && !r.skip);
+    if(!active.length){ errEl.innerHTML = '<div class="notice err">No rows to upload — every row is either removed or skipped.</div>'; return; }
+    const problems = [];
+    active.forEach((r)=>{
+      const missing = memberRowMissingFields(r);
+      if(missing.length) problems.push(`Row for "${r.name||'(no name)'}" is missing: ${missing.join(', ')}.`);
+    });
+    if(problems.length){
+      errEl.innerHTML = `<div class="notice err">Fill in the required fields before uploading:<br>${problems.map(escapeHtml).join('<br>')}</div>`;
       return;
     }
-
+    const saveBtn = wrap.querySelector('#mb-save-btn');
+    saveBtn.disabled = true; saveBtn.textContent = 'Uploading…';
     try{
-      let filled = null;
-      try{
-        filled = await aiScan(file);
-      }catch(aiErr){
-        scanStatus.textContent = aiErr.message + ' Falling back to the basic reader\u2026';
-        filled = null;
-      }
-      if(filled === null){
-        filled = await basicScan(file);
-      }
-      if(filled !== null){
-        scanStatus.textContent = filled
-          ? 'Filled ' + filled + ' field' + (filled===1?'':'s') + ' from the form \u2014 glance over them, then save.'
-          : 'Could not confidently read the details. Fill the fields manually \u2014 the form file will still be saved.';
-      }
-    }catch(e){
-      scanStatus.textContent = e.message || 'Reading failed \u2014 fill the fields manually.';
-    }
-    scanBtn.disabled = false;
-  };
-  scanBtn.onclick = runScan;
-  wrap.querySelector('#m-form-file').onchange = runScan; // auto-fill starts the moment a file is attached
-
-  const row=document.createElement('div'); row.className='action-row';
-  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Add member';
-  b.onclick=async ()=>{
-    const name=document.getElementById('m-name').value.trim();
-    const contact=document.getElementById('m-contact').value.trim();
-    const plan=document.getElementById('m-plan').value;
-    const start=document.getElementById('m-start').value || todayStr();
-    const amount=parseFloat(document.getElementById('m-amount').value)||0;
-    const branch=document.getElementById('m-branch').value;
-    const status=document.getElementById('m-status').value;
-    const tshirtSize=document.getElementById('m-tshirt').value;
-    const source=document.getElementById('m-source').value;
-    const remarks=document.getElementById('m-remarks').value.trim();
-    const picked = wrap.querySelector('#m-form-file').files[0] || null;
-    const errEl=document.getElementById('m-error'); errEl.innerHTML='';
-    if(!picked){ errEl.innerHTML='<div class="notice err">The scanned membership form is required. Attach the PNG, JPG, or PDF before saving — a member cannot be added without their form on file.</div>'; return; }
-    if(!name){ errEl.innerHTML='<div class="notice err">Enter a name for this member.</div>'; return; }
-    b.disabled=true; b.textContent='Saving…';
-    // Use the compressed copy if we made one; otherwise compress now.
-    let formFile = memberFormFile || picked;
-    if(formFile === picked && picked.type.startsWith('image/') && picked.size > UPLOAD_LIMIT_BYTES/2){
-      formFile = await compressImageFile(picked);
-    }
-    if(formFile.size > UPLOAD_LIMIT_BYTES){
-      errEl.innerHTML = `<div class="notice err">This form file is ${(formFile.size/1024/1024).toFixed(1)}MB, over the 4MB upload limit. Re-scan it as a JPG/PNG photo or at a lower resolution, then try again.</div>`;
-      b.disabled=false; b.textContent='Add member'; return;
-    }
-    try{
-      const fd = new FormData();
-      fd.append('file', formFile);
-      fd.append('name', name);
-      fd.append('contact', contact);
-      fd.append('plan', plan);
-      fd.append('startDate', start);
-      fd.append('amount', String(amount));
-      fd.append('branch', branch);
-      fd.append('status', status);
-      fd.append('tshirtSize', tshirtSize);
-      fd.append('source', source);
-      fd.append('remarks', remarks);
-      const res = await fetch('/api/members', {method:'POST', body:fd});
-      if(res.status === 413) throw new Error('The form file is too large to upload (limit about 4MB). Re-scan it smaller and try again.');
+      const res = await fetch('/api/members/bulk-import', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ rows: active.map(r=>({
+          name:r.name, branch:r.branch, startDate:r.startDate, amount:r.amount, status:r.status,
+          source:r.source, tshirtSize:r.tshirtSize, tshirtReleasedDate:r.tshirtReleasedDate,
+          keyfobReleasedDate:r.keyfobReleasedDate||null, memberNo:r.memberNo, contact:r.contact, plan:'Annual',
+        })) }),
+      });
       const data = await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(data.error || 'Something went wrong.');
-      state.members.push(mapMember(data.member));
-      state.modal=null; render();
-    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add member'; }
-  };
-  row.appendChild(b); modal.appendChild(row);
+      (data.inserted||[]).forEach(m=>state.members.push(mapMember(m)));
+      showResult(data);
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; saveBtn.disabled=false; saveBtn.textContent='Save'; }
+  }
+
+  function showResult(data){
+    const mismatches = (data.salesCheck||[]).filter(s=>s.mismatch);
+    wrap.innerHTML = `
+      <div class="notice ok">Uploaded ${data.inserted.length} member(s).</div>
+      ${mismatches.length ? mismatches.map(s=>`<div class="notice err">On ${escapeHtml(fmtDate(s.date))}, you uploaded ${s.uploadedCount} member(s), but the Sales Tracker shows ${s.expectedCount} Annual Membership sale(s) for that day — double-check for missing or extra entries.</div>`).join('') : ''}
+      <div class="action-row"><button class="btn primary" id="mb-done" type="button">Done</button></div>
+    `;
+    wrap.querySelector('#mb-done').onclick = ()=>{ state.modal=null; render(); };
+  }
+
+  function showStep3(){
+    wrap.innerHTML = `
+      <div class="notice">Fill in the fields a POS report won't carry (t-shirt size/date, keyfob date for Malabon, source), remove any junk rows, then check for duplicates before saving.</div>
+      <div id="mb-grid-wrap"></div>
+      <div class="action-row" style="margin-top:10px;">
+        <button class="btn ghost" id="mb-back2" type="button">&larr; Re-map columns</button>
+        <button class="btn" id="mb-dup-btn" type="button">Check duplicates</button>
+        <span class="hint" id="mb-dup-status"></span>
+      </div>
+      <div id="mb-save-error"></div>
+      <div class="action-row">
+        <button class="btn primary" id="mb-save-btn" type="button">Save</button>
+      </div>
+    `;
+    wrap.querySelector('#mb-back2').onclick = showStep2;
+    wrap.querySelector('#mb-dup-btn').onclick = checkDuplicates;
+    wrap.querySelector('#mb-save-btn').onclick = saveRows;
+    renderGrid();
+  }
+
+  showStep1();
 }
 
 function renderRenewMemberModal(modal){
@@ -5098,6 +5159,310 @@ function renderModal(){
   if(state.modal.type==='newSale') return renderNewSaleModal(modal);
   if(state.modal.type==='newMember') return renderNewMemberModal(modal);
   if(state.modal.type==='renewMember') return renderRenewMemberModal(modal);
+  if(state.modal.type==='trialDetail') return renderTrialDetailModal(modal);
+  if(state.modal.type==='trialApprove') return renderTrialApproveModal(modal);
+  if(state.modal.type==='trialReschedule') return renderTrialRescheduleModal(modal);
+  if(state.modal.type==='trialDaypass') return renderTrialDaypassModal(modal);
 }
+
+// ============ FREE TRIAL BOOKING ============
+// Online free-trial registrations arrive from a Google Form via Apps Script
+// (POST /api/trial-intake). Admin approves / reschedules and sends a day pass;
+// all emails go out through Apps Script + Gmail (see the send Web App).
+// Class services must land on a real class slot; Personal training and Gym
+// Access take a free date/time. Schedule mirrors trial-class-schedule.json.
+const TRIAL_CLASS_SERVICES = ['HIIT/Circuit Training','Boxing','MuayThai','Taekwondo'];
+const TRIAL_FREE_SERVICES  = ['Personal training','Gym Access'];
+const TRIAL_ALL_SERVICES   = ['Personal training','HIIT/Circuit Training','Boxing','MuayThai','Taekwondo','Gym Access'];
+const TRIAL_SCHEDULE = {
+  Manila: {
+    'HIIT/Circuit Training': ['Mon 07:00','Mon 09:00','Mon 13:00','Mon 16:30','Mon 18:00','Mon 19:30','Mon 21:30','Tue 07:00','Tue 09:00','Tue 13:00','Tue 16:30','Tue 18:00','Tue 19:30','Tue 21:30','Wed 07:00','Wed 09:00','Wed 13:00','Wed 16:30','Wed 18:00','Wed 19:30','Wed 21:30','Thu 07:00','Thu 09:00','Thu 13:00','Thu 16:30','Thu 18:00','Thu 19:30','Thu 21:30','Fri 07:00','Fri 09:00','Fri 13:00','Fri 16:30','Fri 18:00','Fri 19:30','Fri 21:30','Sat 07:00','Sat 09:00','Sat 13:00','Sat 17:00','Sat 19:30','Sat 21:30'],
+    'Boxing': ['Mon 16:30','Wed 16:30','Fri 16:30','Sun 17:00'],
+    'MuayThai': ['Mon 10:00','Wed 10:00','Fri 10:00','Mon 19:00','Tue 19:00','Wed 19:00','Thu 19:00','Fri 19:00'],
+    'Taekwondo': ['Sat 14:00','Sun 14:00','Sat 15:30','Sun 15:30'],
+  },
+  Malabon: {
+    'HIIT/Circuit Training': ['Mon 07:00','Mon 09:30','Mon 13:00','Mon 16:00','Mon 18:00','Mon 20:30','Tue 07:00','Tue 09:30','Tue 13:00','Tue 16:00','Tue 18:00','Tue 20:30','Wed 07:00','Wed 09:30','Wed 13:00','Wed 16:00','Wed 18:00','Wed 20:30','Thu 07:00','Thu 09:30','Thu 13:00','Thu 16:00','Thu 18:00','Thu 20:30','Fri 07:00','Fri 09:30','Fri 13:00','Fri 16:00','Fri 18:00','Fri 20:30','Sat 15:00','Sat 18:00','Sat 20:30'],
+    'Boxing': ['Mon 19:00','Wed 19:00','Fri 19:00','Sat 16:00','Sun 16:00'],
+    'MuayThai': ['Mon 19:00','Wed 19:00','Fri 19:00','Sat 16:00','Sun 16:00'],
+    'Taekwondo': ['Sat 07:00','Sun 07:00','Sat 10:00','Sun 10:00'],
+  },
+};
+function trialIsClass(service){ return TRIAL_CLASS_SERVICES.includes(service); }
+function trialSlotsFor(branch, service){ return (TRIAL_SCHEDULE[branch] && TRIAL_SCHEDULE[branch][service]) || []; }
+function trialFmtTime12(hhmm){ if(!hhmm) return ''; const p=String(hhmm).split(':'); let h=Number(p[0]); const m=p[1]||'00'; const ap=h<12?'AM':'PM'; h=h%12; if(h===0)h=12; return h+':'+m+' '+ap; }
+function trialNextDateForWeekday(abbr){
+  const map={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6}; const t=map[abbr];
+  if(t==null) return todayStr();
+  const d=new Date(); let add=(t-d.getDay()+7)%7; if(add===0) add=7; d.setDate(d.getDate()+add);
+  return d.toISOString().slice(0,10);
+}
+function mapTrialBooking(b){
+  return {
+    id:b.id, createdAt:b.created_at, submittedAt:b.submitted_at,
+    fullName:b.full_name, mobile:b.mobile_number, email:b.email,
+    gender:b.gender, genderOther:b.gender_other, age:b.age,
+    branch:b.preferred_branch||'', prefTime:b.preferred_time||'', prefDate:b.preferred_date||'',
+    service:b.service||'', goal:b.fitness_goal||'', frequency:b.exercise_frequency||'',
+    frequencyOther:b.exercise_frequency_other||'', injuries:b.injuries_medical||'',
+    heardAbout:b.heard_about_us||'', heardAboutOther:b.heard_about_us_other||'', referral:b.referral||'',
+    consentAble:!!b.consent_physically_able, consentRules:!!b.consent_follow_rules, consentSchedule:!!b.consent_schedule_subject,
+    status:b.status||'Pending',
+    confService:b.confirmed_service||'', confBranch:b.confirmed_branch||'', confDate:b.confirmed_date||'', confTime:b.confirmed_time||'',
+    rescheduleReason:b.reschedule_reason||'', adminNotes:b.admin_notes||'',
+    approvedAt:b.approved_at||null, confirmationSentAt:b.confirmation_email_sent_at||null, daypassSentAt:b.daypass_email_sent_at||null,
+  };
+}
+function upsertTrialBooking(mapped){
+  const i = state.trialBookings.findIndex(b=>b.id===mapped.id);
+  if(i>=0) state.trialBookings[i]=mapped; else state.trialBookings.unshift(mapped);
+}
+function trialStatusPill(status){
+  const color = status==='Approved' ? '#3fb950' : status==='Reschedule' ? '#f0a020' : status==='Completed' ? '#58a6ff' : '#8b949e';
+  return `<span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;color:#0d0d0f;background:${color};">${escapeHtml(status)}</span>`;
+}
+
+// Day-pass QR code: uploaded once from here, stored in Supabase Storage, and
+// sent as a base64 attachment with every day-pass email (no Google Drive file ID).
+function renderTrialQrBox(){
+  const qr = state.trialQr || {exists:false};
+  const box = document.createElement('div');
+  box.style.cssText='display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 12px;background:var(--bg-2);border:1px solid var(--line);border-radius:7px;';
+  const label = document.createElement('span'); label.className='hint';
+  label.textContent = qr.exists
+    ? 'Day pass QR code: uploaded' + (qr.updatedAt ? (' ' + fmtDate(qr.updatedAt)) : '')
+    : 'No day-pass QR code uploaded yet — day passes can\'t be sent until one is.';
+  if(!qr.exists) label.style.color = '#f0a020';
+  const btn = document.createElement('button'); btn.className='btn sm ghost'; btn.textContent = qr.exists ? 'Replace QR code' : 'Upload QR code';
+  const input = document.createElement('input'); input.type='file'; input.accept='image/png,image/jpeg'; input.style.display='none';
+  btn.onclick = ()=> input.click();
+  input.onchange = async ()=>{
+    const file = input.files[0]; if(!file) return;
+    btn.disabled = true; btn.textContent = 'Uploading…';
+    try{
+      const fd = new FormData(); fd.append('file', file);
+      const res = await fetch('/api/trial-qr', {method:'POST', body:fd});
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data.error || 'Upload failed.');
+      state.trialQr = {exists:true, path:data.path, updatedAt:data.updatedAt};
+      renderContent();
+    }catch(err){
+      alert(err.message);
+      btn.disabled = false; btn.textContent = qr.exists ? 'Replace QR code' : 'Upload QR code';
+    }
+  };
+  box.appendChild(label); box.appendChild(btn); box.appendChild(input);
+  return box;
+}
+
+function renderTrialBooking(el){
+  const all = state.trialBookings || [];
+  const pending = all.filter(b=>b.status==='Pending').length;
+  const approved = all.filter(b=>b.status==='Approved').length;
+  const resched = all.filter(b=>b.status==='Reschedule').length;
+  const daypasses = all.filter(b=>b.daypassSentAt).length;
+
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  metrics.innerHTML = `
+    <div class="metric ${pending>0?'flag':''}"><div class="num">${pending}</div><div class="lbl">Pending review</div></div>
+    <div class="metric good"><div class="num">${approved}</div><div class="lbl">Approved</div></div>
+    <div class="metric ${resched>0?'flag':''}"><div class="num">${resched}</div><div class="lbl">For reschedule</div></div>
+    <div class="metric"><div class="num">${daypasses}</div><div class="lbl">Day passes sent</div></div>
+  `;
+  el.appendChild(metrics);
+  el.appendChild(renderTrialQrBox());
+
+  const head = document.createElement('div'); head.className='section-head';
+  head.innerHTML = '<h2>Free trial bookings</h2>';
+  const toolbar = document.createElement('div'); toolbar.className='toolbar';
+  toolbar.innerHTML = `
+    <select id="tb-status">
+      ${['All','Pending','Approved','Reschedule','Completed'].map(s=>`<option value="${s}" ${state.trialFilter===s?'selected':''}>${s}</option>`).join('')}
+    </select>
+    <select id="tb-branch">
+      ${['All','Manila','Malabon'].map(s=>`<option value="${s}" ${state.trialBranch===s?'selected':''}>${s}</option>`).join('')}
+    </select>
+    <input id="tb-search" type="text" placeholder="Search name, email, phone" value="${escapeHtml(state.trialSearch||'')}" style="min-width:200px;">
+  `;
+  head.appendChild(toolbar);
+  el.appendChild(head);
+  toolbar.querySelector('#tb-status').onchange=(e)=>{ state.trialFilter=e.target.value; renderContent(); };
+  toolbar.querySelector('#tb-branch').onchange=(e)=>{ state.trialBranch=e.target.value; renderContent(); };
+  toolbar.querySelector('#tb-search').oninput=(e)=>{ state.trialSearch=e.target.value; renderContent(); };
+
+  const q = (state.trialSearch||'').trim().toLowerCase();
+  let rows = all.filter(b=>{
+    if(state.trialFilter && state.trialFilter!=='All' && b.status!==state.trialFilter) return false;
+    if(state.trialBranch && state.trialBranch!=='All' && b.branch!==state.trialBranch) return false;
+    if(q){ const hay=(b.fullName+' '+b.email+' '+b.mobile).toLowerCase(); if(hay.indexOf(q)<0) return false; }
+    return true;
+  });
+  rows.sort((a,b)=> String(b.submittedAt||b.createdAt||'').localeCompare(String(a.submittedAt||a.createdAt||'')));
+
+  if(!rows.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No bookings match this view yet.'; el.appendChild(e); return; }
+
+  const table=document.createElement('table');
+  table.innerHTML='<thead><tr><th>Submitted</th><th>Name</th><th>Contact</th><th>Branch</th><th>Service</th><th>Preferred</th><th>Confirmed</th><th>Status</th><th></th></tr></thead>';
+  const tb=document.createElement('tbody');
+  rows.forEach(b=>{
+    const tr=document.createElement('tr');
+    const confirmed = b.confDate ? (fmtDate(b.confDate)+' · '+(b.confTime||'')) : '<span class="hint">—</span>';
+    const preferred = (b.prefDate?fmtDate(b.prefDate):'') + (b.prefTime?(' · '+b.prefTime):'');
+    tr.innerHTML = `
+      <td>${b.submittedAt?fmtDate(b.submittedAt):fmtDate(b.createdAt)}</td>
+      <td>${escapeHtml(b.fullName)}<div class="hint">${escapeHtml(b.gender||'')}${b.age?(' · '+b.age):''}</div></td>
+      <td>${escapeHtml(b.mobile)}<div class="hint">${escapeHtml(b.email)}</div></td>
+      <td>${escapeHtml(b.branch)}</td>
+      <td>${escapeHtml(b.service)}</td>
+      <td>${preferred||'<span class="hint">—</span>'}</td>
+      <td>${confirmed}</td>
+      <td>${trialStatusPill(b.status)}${b.daypassSentAt?'<div class="hint">Day pass sent</div>':''}</td>
+      <td></td>`;
+    const actTd = tr.lastElementChild;
+    const acts = document.createElement('div'); acts.style.cssText='display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;';
+    function addBtn(label, variant, onClick){ const x=document.createElement('button'); x.className='btn sm'+(variant?(' '+variant):''); x.textContent=label; x.onclick=onClick; acts.appendChild(x); }
+    addBtn('Details','ghost', ()=>{ state.modal={type:'trialDetail', id:b.id}; render(); });
+    if(b.status==='Pending' || b.status==='Reschedule'){
+      addBtn('Approve','primary', ()=>{ state.modal={type:'trialApprove', id:b.id}; render(); });
+    }
+    if(b.status==='Pending' || b.status==='Approved'){
+      addBtn('Reschedule', '', ()=>{ state.modal={type:'trialReschedule', id:b.id}; render(); });
+    }
+    if(b.status==='Approved' || b.status==='Reschedule'){
+      addBtn(b.daypassSentAt?'Resend day pass':'Send day pass','primary', ()=>{ state.modal={type:'trialDaypass', id:b.id}; render(); });
+    }
+    actTd.appendChild(acts);
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+  el.appendChild(table);
+}
+
+function trialFindBooking(id){ return (state.trialBookings||[]).find(b=>b.id===id); }
+
+function renderTrialDetailModal(modal){
+  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML=`<h2 style="font-size:16px;">${escapeHtml(b.fullName)} · free trial</h2>`; head.appendChild(closeBtn()); modal.appendChild(head);
+  const rows = [
+    ['Status', b.status], ['Submitted', b.submittedAt?fmtDateTime(b.submittedAt):fmtDateTime(b.createdAt)],
+    ['Email', b.email], ['Mobile', b.mobile], ['Gender', b.gender+(b.genderOther?(' ('+b.genderOther+')'):'')], ['Age', b.age],
+    ['Branch', b.branch], ['Service', b.service], ['Preferred date', b.prefDate?fmtDate(b.prefDate):'—'], ['Preferred time', b.prefTime||'—'],
+    ['Fitness goal', b.goal], ['Exercise frequency', b.frequency+(b.frequencyOther?(' ('+b.frequencyOther+')'):'')],
+    ['Injuries / medical', b.injuries||'—'], ['Heard about us', b.heardAbout+(b.heardAboutOther?(' ('+b.heardAboutOther+')'):'')], ['Referral', b.referral||'—'],
+    ['Consent', [b.consentAble?'Physically able':'', b.consentRules?'Follows rules':'', b.consentSchedule?'Accepts schedule':''].filter(Boolean).join(' · ')||'—'],
+    ['Confirmed', b.confDate?(b.confService+' · '+b.confBranch+' · '+fmtDate(b.confDate)+' '+(b.confTime||'')):'—'],
+    ['Reschedule reason', b.rescheduleReason||'—'],
+  ];
+  const wrap=document.createElement('div'); wrap.style.cssText='display:grid;grid-template-columns:150px 1fr;gap:6px 12px;font-size:13px;';
+  rows.forEach(([k,v])=>{ wrap.innerHTML += `<div class="hint">${escapeHtml(k)}</div><div>${escapeHtml(String(v==null?'':v))}</div>`; });
+  modal.appendChild(wrap);
+}
+
+// Shared field builder for Approve / Reschedule: service, branch, slot (class) or free date/time.
+function trialScheduleFields(b, prefix){
+  const service0 = b.confService || b.service || TRIAL_ALL_SERVICES[0];
+  const branch0  = b.confBranch  || b.branch  || 'Manila';
+  const date0    = b.confDate    || b.prefDate || todayStr();
+  const wrap=document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field"><label>Service</label><select id="${prefix}-service">${TRIAL_ALL_SERVICES.map(s=>`<option value="${escapeHtml(s)}" ${s===service0?'selected':''}>${escapeHtml(s)}</option>`).join('')}</select></div>
+      <div class="field"><label>Branch</label><select id="${prefix}-branch">${['Manila','Malabon'].map(s=>`<option value="${s}" ${s===branch0?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field full" id="${prefix}-slot-wrap"><label>Class slot</label><select id="${prefix}-slot"></select><div class="hint" id="${prefix}-slot-hint"></div></div>
+      <div class="field"><label>Confirmed date</label><input id="${prefix}-date" type="date" value="${date0}"></div>
+      <div class="field"><label>Confirmed time</label><input id="${prefix}-time" type="text" placeholder="e.g. 7:00 AM" value="${escapeHtml(b.confTime||b.prefTime||'')}"></div>
+    </div>`;
+  const serviceSel=wrap.querySelector('#'+prefix+'-service');
+  const branchSel=wrap.querySelector('#'+prefix+'-branch');
+  const slotWrap=wrap.querySelector('#'+prefix+'-slot-wrap');
+  const slotSel=wrap.querySelector('#'+prefix+'-slot');
+  const slotHint=wrap.querySelector('#'+prefix+'-slot-hint');
+  const dateInp=wrap.querySelector('#'+prefix+'-date');
+  const timeInp=wrap.querySelector('#'+prefix+'-time');
+  function rebuildSlots(){
+    const svc=serviceSel.value, br=branchSel.value;
+    if(!trialIsClass(svc)){
+      slotWrap.style.display='none';
+      slotHint.textContent='';
+      return;
+    }
+    slotWrap.style.display='';
+    const slots=trialSlotsFor(br, svc);
+    if(!slots.length){ slotSel.innerHTML='<option value="">No class slots at this branch</option>'; slotHint.textContent='This service is not on the '+br+' schedule.'; return; }
+    slotSel.innerHTML='<option value="">— pick a class slot —</option>'+slots.map(s=>{ const [d,t]=s.split(' '); return `<option value="${s}">${d} · ${trialFmtTime12(t)}</option>`; }).join('');
+    slotHint.textContent='Only real '+svc+' slots for '+br+' are listed.';
+  }
+  slotSel && (slotSel.onchange=()=>{ const v=slotSel.value; if(!v) return; const [d,t]=v.split(' '); dateInp.value=trialNextDateForWeekday(d); timeInp.value=trialFmtTime12(t); });
+  serviceSel.onchange=rebuildSlots; branchSel.onchange=rebuildSlots;
+  rebuildSlots();
+  return { wrap, get(){ return { service:serviceSel.value, branch:branchSel.value, date:dateInp.value, time:timeInp.value.trim() }; } };
+}
+
+function renderTrialApproveModal(modal){
+  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Approve trial — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const note=document.createElement('div'); note.className='hint'; note.style.margin='0 0 10px'; note.textContent='On approval the applicant gets a confirmation email (service, branch, date, time) via Gmail.'; modal.appendChild(note);
+  const fields=trialScheduleFields(b,'ap'); modal.appendChild(fields.wrap);
+  const err=document.createElement('div'); err.id='ap-error'; modal.appendChild(err);
+  const row=document.createElement('div'); row.className='action-row';
+  const btn=document.createElement('button'); btn.className='btn primary'; btn.textContent='Approve & send confirmation';
+  btn.onclick=async ()=>{
+    const v=fields.get(); const e=document.getElementById('ap-error'); e.innerHTML='';
+    if(!v.date || !v.time){ e.innerHTML='<div class="notice err">Set the confirmed date and time.</div>'; return; }
+    if(trialIsClass(v.service)){ const ok=trialSlotsFor(v.branch,v.service).length>0; if(!ok){ e.innerHTML='<div class="notice err">'+escapeHtml(v.service)+' has no slots at '+escapeHtml(v.branch)+'. Pick another branch or service.</div>'; return; } }
+    btn.disabled=true; btn.textContent='Sending…';
+    try{
+      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'approve', service:v.service, branch:v.branch, date:v.date, time:v.time});
+      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
+    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Approve & send confirmation'; }
+  };
+  row.appendChild(btn); modal.appendChild(row);
+}
+
+function renderTrialRescheduleModal(modal){
+  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Reschedule — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const note=document.createElement('div'); note.className='hint'; note.style.margin='0 0 10px'; note.textContent='Set the new date/time and an optional reason. The applicant is emailed the new schedule.'; modal.appendChild(note);
+  const fields=trialScheduleFields(b,'rs'); modal.appendChild(fields.wrap);
+  const extra=document.createElement('div'); extra.innerHTML='<div class="field full"><label>Reason / note to applicant (optional)</label><input id="rs-reason" type="text" placeholder="e.g. Coach unavailable at your first choice"></div>'; modal.appendChild(extra);
+  const err=document.createElement('div'); err.id='rs-error'; modal.appendChild(err);
+  const row=document.createElement('div'); row.className='action-row';
+  const btn=document.createElement('button'); btn.className='btn primary'; btn.textContent='Save & email new schedule';
+  btn.onclick=async ()=>{
+    const v=fields.get(); const reason=(document.getElementById('rs-reason').value||'').trim(); const e=document.getElementById('rs-error'); e.innerHTML='';
+    if(!v.date || !v.time){ e.innerHTML='<div class="notice err">Set the new date and time.</div>'; return; }
+    btn.disabled=true; btn.textContent='Sending…';
+    try{
+      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'reschedule', service:v.service, branch:v.branch, date:v.date, time:v.time, reason});
+      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
+    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Save & email new schedule'; }
+  };
+  row.appendChild(btn); modal.appendChild(row);
+}
+
+function renderTrialDaypassModal(modal){
+  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Send day pass — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const when = b.confDate ? (fmtDate(b.confDate)+' '+(b.confTime||'')) : 'your confirmed schedule';
+  const defClosing = `We can't wait to see you at Roshan Gym ${escapeHtml(b.confBranch||b.branch)}! Show this day pass at the front desk on ${escapeHtml(when)}. Come ready to sweat, have fun, and take the first step toward your goals. See you soon! 💪`;
+  const wrap=document.createElement('div');
+  wrap.innerHTML = `
+    <div class="hint" style="margin:0 0 10px;">Emails your existing POS QR code to <b>${escapeHtml(b.email)}</b> as a day pass, with the closing message below. (The QR image is attached automatically from Google Drive by the send script.)</div>
+    <div class="field full"><label>Closing message</label><textarea id="dp-closing" rows="4" style="width:100%;">${defClosing}</textarea></div>
+    <div id="dp-error"></div>`;
+  modal.appendChild(wrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const btn=document.createElement('button'); btn.className='btn primary'; btn.textContent='Send day pass';
+  btn.onclick=async ()=>{
+    const closing=(document.getElementById('dp-closing').value||'').trim(); const e=document.getElementById('dp-error'); e.innerHTML='';
+    btn.disabled=true; btn.textContent='Sending…';
+    try{
+      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'daypass', closing});
+      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
+    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Send day pass'; }
+  };
+  row.appendChild(btn); modal.appendChild(row);
+}
+
 
 loadAll();
