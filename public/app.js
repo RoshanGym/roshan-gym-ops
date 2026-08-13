@@ -29,6 +29,11 @@ let state = {
   taskFilterAssignee: 'All',
   salesMonth: monthStr(new Date()),
   memberFilter: 'All',
+  memberView: 'list',
+  memberBranch: 'All',
+  memberStartFrom: '', memberStartTo: '',
+  memberExpiryFrom: '', memberExpiryTo: '',
+  memberSearch: '',
   trackerType: 'All',
   reqStatusFilter: null,
   reqRequestor: null,
@@ -4057,8 +4062,36 @@ function renderMembership(el){
     <option value="Expiring soon" ${state.memberFilter==='Expiring soon'?'selected':''}>Expiring soon</option>
     <option value="Expired" ${state.memberFilter==='Expired'?'selected':''}>Expired</option>
     <option value="Needs review" ${state.memberFilter==='Needs review'?'selected':''}>Needs review</option>
-  </select>`;
+  </select>
+  <select id="member-branch">
+    <option value="All" ${state.memberBranch==='All'?'selected':''}>All branches</option>
+    <option value="Manila" ${state.memberBranch==='Manila'?'selected':''}>Manila</option>
+    <option value="Malabon" ${state.memberBranch==='Malabon'?'selected':''}>Malabon</option>
+  </select>
+  <input id="member-search" type="text" placeholder="Search name" value="${escapeHtml(state.memberSearch||'')}" style="min-width:180px;">`;
   head.appendChild(toolbar);
+  toolbar.querySelector('#member-branch').onchange=(e)=>{ state.memberBranch=e.target.value; renderContent(); };
+  toolbar.querySelector('#member-search').oninput=(e)=>{ state.memberSearch=e.target.value; renderContent(); };
+
+  const startRangeWrap = document.createElement('span'); startRangeWrap.style.cssText='display:inline-flex;align-items:center;gap:4px;';
+  const startLbl = document.createElement('span'); startLbl.className='hint'; startLbl.textContent='Membership date:';
+  startRangeWrap.appendChild(startLbl);
+  startRangeWrap.appendChild(dateRangeControl(()=>state.memberStartFrom, ()=>state.memberStartTo, (f,t)=>{ state.memberStartFrom=f; state.memberStartTo=t; render(); }));
+  toolbar.appendChild(startRangeWrap);
+
+  const expiryRangeWrap = document.createElement('span'); expiryRangeWrap.style.cssText='display:inline-flex;align-items:center;gap:4px;';
+  const expiryLbl = document.createElement('span'); expiryLbl.className='hint'; expiryLbl.textContent='Expiry date:';
+  expiryRangeWrap.appendChild(expiryLbl);
+  expiryRangeWrap.appendChild(dateRangeControl(()=>state.memberExpiryFrom, ()=>state.memberExpiryTo, (f,t)=>{ state.memberExpiryFrom=f; state.memberExpiryTo=t; render(); }));
+  toolbar.appendChild(expiryRangeWrap);
+
+  const viewToggle = document.createElement('div'); viewToggle.className='role-switch';
+  ['list','card'].forEach(v=>{
+    const b=document.createElement('button'); b.className='role-btn'+(state.memberView===v?' active':''); b.textContent=v==='list'?'List':'Cards';
+    b.onclick=()=>{ state.memberView=v; render(); };
+    viewToggle.appendChild(b);
+  });
+  toolbar.appendChild(viewToggle);
   const exportBtn=document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
   exportBtn.onclick=()=>{
     if(typeof XLSX==='undefined'){ alert('The Excel library did not load. Refresh the page.'); return; }
@@ -4103,36 +4136,29 @@ function renderMembership(el){
   let list = withStatus;
   if(state.memberFilter==='Needs review') list = list.filter(m=>m.needsReview);
   else if(state.memberFilter!=='All') list = list.filter(m=>m.computed===state.memberFilter);
+  if(state.memberBranch!=='All') list = list.filter(m=>m.branch===state.memberBranch);
+  list = list.filter(m=>inDateRange(m.startDate, state.memberStartFrom, state.memberStartTo));
+  list = list.filter(m=>inDateRange(m.expiryDate, state.memberExpiryFrom, state.memberExpiryTo));
+  const memberQ = (state.memberSearch||'').trim().toLowerCase();
+  if(memberQ) list = list.filter(m=>(m.name||'').toLowerCase().includes(memberQ));
   list.sort((a,b)=> a.expiryDate.localeCompare(b.expiryDate));
 
   if(list.length===0){
     const e=document.createElement('div'); e.className='empty'; e.textContent='No members match this filter.'; el.appendChild(e); return;
   }
 
-  list.forEach(m=>{
-    const card = document.createElement('div'); card.className='card';
-    const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
-    const subBits = [m.contact||'—', m.branch||null, m.memberNo?('#'+m.memberNo):null, m.plan, 'expires '+fmtDate(m.expiryDate), m.tshirtSize?('shirt '+m.tshirtSize):null, m.source||null].filter(Boolean).map(escapeHtml);
-    card.innerHTML = `
-      <div class="req-top">
-        <div>
-          <div class="req-title">${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge neutral">no form on file</span>'} ${m.needsReview?'<span class="badge flag">needs review</span>':''}</div>
-          <div class="req-sub">${subBits.join(' &middot; ')}</div>
-        </div>
-        <span class="badge ${badgeClass}">${m.computed}</span>
-      </div>
-    `;
-    const row = document.createElement('div'); row.className='action-row';
+  // Renew / view-form / upload-form actions — shared by the card and list views.
+  function memberActionButtons(m){
+    const btns = [];
     if(m.formPath){
       const vf = document.createElement('button'); vf.className='btn sm'; vf.textContent='📄 View form';
       vf.onclick = ()=>window.open(`/api/members/${m.id}/form`, '_blank');
-      row.appendChild(vf);
+      btns.push(vf);
     }
     if(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin'){
       const b = document.createElement('button'); b.className='btn primary sm'; b.textContent='Renew';
       b.onclick=()=>{ state.modal={type:'renewMember', id:m.id}; render(); };
-      row.appendChild(b);
-      // Upload (or replace) the scanned form
+      btns.push(b);
       const fileInput = document.createElement('input');
       fileInput.type='file'; fileInput.accept='image/png,image/jpeg,application/pdf'; fileInput.style.display='none';
       const upBtn = document.createElement('button'); upBtn.className='btn sm' + (m.formPath?' ghost':''); upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
@@ -4154,8 +4180,60 @@ function renderMembership(el){
         }catch(e){ alert(e.message); upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form'; }
       };
       upBtn.onclick = ()=>fileInput.click();
-      row.appendChild(upBtn); row.appendChild(fileInput);
+      btns.push(upBtn, fileInput);
     }
+    return btns;
+  }
+
+  if(state.memberView==='list'){
+    const wrap = document.createElement('div'); wrap.style.overflowX='auto';
+    const table = document.createElement('table'); table.className='simple';
+    table.innerHTML = `<thead><tr>
+      <th>Name</th><th>Branch</th><th>Member no.</th><th>Contact</th><th>Status</th>
+      <th>Membership date</th><th>Expiry date</th><th>T-shirt</th><th>Source</th><th>Standing</th><th></th>
+    </tr></thead><tbody></tbody>`;
+    const tbody = table.querySelector('tbody');
+    list.forEach(m=>{
+      const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge neutral">no form</span>'} ${m.needsReview?'<span class="badge flag">review</span>':''}</td>
+        <td>${escapeHtml(m.branch||'')}</td>
+        <td>${escapeHtml(m.memberNo||'')}</td>
+        <td>${escapeHtml(m.contact||'')}</td>
+        <td>${escapeHtml(m.status||'')}</td>
+        <td>${fmtDate(m.startDate)}</td>
+        <td>${fmtDate(m.expiryDate)}</td>
+        <td>${escapeHtml(m.tshirtSize||'')}</td>
+        <td>${escapeHtml(m.source||'')}</td>
+        <td><span class="badge ${badgeClass}">${m.computed}</span></td>
+        <td></td>
+      `;
+      const actionsTd = tr.lastElementChild;
+      actionsTd.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
+      memberActionButtons(m).forEach(b=>actionsTd.appendChild(b));
+      tbody.appendChild(tr);
+    });
+    wrap.appendChild(table);
+    el.appendChild(wrap);
+    return;
+  }
+
+  list.forEach(m=>{
+    const card = document.createElement('div'); card.className='card';
+    const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
+    const subBits = [m.contact||'—', m.branch||null, m.memberNo?('#'+m.memberNo):null, m.plan, 'expires '+fmtDate(m.expiryDate), m.tshirtSize?('shirt '+m.tshirtSize):null, m.source||null].filter(Boolean).map(escapeHtml);
+    card.innerHTML = `
+      <div class="req-top">
+        <div>
+          <div class="req-title">${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge neutral">no form on file</span>'} ${m.needsReview?'<span class="badge flag">needs review</span>':''}</div>
+          <div class="req-sub">${subBits.join(' &middot; ')}</div>
+        </div>
+        <span class="badge ${badgeClass}">${m.computed}</span>
+      </div>
+    `;
+    const row = document.createElement('div'); row.className='action-row';
+    memberActionButtons(m).forEach(b=>row.appendChild(b));
     if(row.children.length) card.appendChild(row);
     el.appendChild(card);
   });
