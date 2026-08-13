@@ -1,6 +1,6 @@
-import { handleAction } from '../../../../lib/trial';
-import { requireSession } from '../../../../lib/auth';
-import { withApi } from '../../../../lib/api';
+import { handleAction } from '../../../../../lib/trial';
+import { requireSession } from '../../../../../lib/auth';
+import { withApi } from '../../../../../lib/api';
 
 export const POST = withApi(async (req, { params }) => {
   requireSession();
