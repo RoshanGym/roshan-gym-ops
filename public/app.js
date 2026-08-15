@@ -230,7 +230,7 @@ function inDateRange(dateStr, from, to){
   if(to && d > to) return false;
   return true;
 }
-function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null, tshirtReleasedDate:m.tshirt_released_date||'', keyfobReleasedDate:m.keyfob_released_date||'', memberNo:m.member_no||'', needsReview:!!m.needs_review}; }
+function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null, tshirtReleasedDate:m.tshirt_released_date||'', keyfobReleasedDate:m.keyfob_released_date||'', memberNo:m.member_no||'', needsReview:!!m.needs_review, email:m.email||'', formUrl:m.form_url||null}; }
 function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
 
 function upsertRequest(mapped){
@@ -4040,7 +4040,7 @@ function renderMembership(el){
     return sum + hist.reduce((s,h)=>s+Number(h.amount||0),0);
   },0);
 
-  const missingForm = state.members.filter(m=>!m.formPath).length;
+  const missingForm = state.members.filter(m=>!m.formPath && !m.formUrl).length;
   const needsReview = state.members.filter(m=>m.needsReview).length;
   const metrics = document.createElement('div'); metrics.className='metrics';
   metrics.innerHTML = `
@@ -4100,8 +4100,9 @@ function renderMembership(el){
       'Member #': m.id,
       'Name': m.name,
       'Branch': m.branch||'',
-      'Contact': m.contact||'',
-      'Status (New/Renew)': m.status||'',
+      'Contact no.': m.contact||'',
+      'Email': m.email||'',
+      'Membership type (New/Renewal)': m.status||'',
       'Plan': m.plan,
       'Start date': m.startDate,
       'Expiry date': m.expiryDate,
@@ -4114,7 +4115,7 @@ function renderMembership(el){
       'Source': m.source||'',
       'Remarks': m.remarks||'',
       'Needs review': m.needsReview?'Yes':'',
-      'Form on file': m.formPath?'Yes':'NO',
+      'Form on file': (m.formPath||m.formUrl)?'Yes':'NO',
       'Form uploaded by': m.formUploadedBy||'',
       'Added by': m.createdBy||'',
     }));
@@ -4150,7 +4151,7 @@ function renderMembership(el){
   // Renew / view-form / upload-form actions — shared by the card and list views.
   function memberActionButtons(m){
     const btns = [];
-    if(m.formPath){
+    if(m.formPath || m.formUrl){
       const vf = document.createElement('button'); vf.className='btn sm'; vf.textContent='📄 View form';
       vf.onclick = ()=>window.open(`/api/members/${m.id}/form`, '_blank');
       btns.push(vf);
@@ -4159,9 +4160,29 @@ function renderMembership(el){
       const b = document.createElement('button'); b.className='btn primary sm'; b.textContent='Renew';
       b.onclick=()=>{ state.modal={type:'renewMember', id:m.id}; render(); };
       btns.push(b);
+
+      // Forms already live in Google Drive as part of the daily workflow, so
+      // saving a link there is the primary path; uploading a file directly
+      // stays available too, for anyone who doesn't have a Drive copy.
+      const linkBtn = document.createElement('button'); linkBtn.className='btn sm' + (m.formUrl?' ghost':''); linkBtn.textContent = m.formUrl ? '🔗 Replace Drive link' : '🔗 Save Drive link';
+      linkBtn.onclick = async ()=>{
+        const url = prompt('Paste the Google Drive link to this member’s membership form:', m.formUrl||'');
+        if(!url) return;
+        linkBtn.disabled=true;
+        try{
+          const res = await fetch(`/api/members/${m.id}/form`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url}) });
+          const data = await res.json().catch(()=>({}));
+          if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+          const i = state.members.findIndex(x=>x.id===m.id);
+          if(i>=0) state.members[i] = mapMember(data.member);
+          render();
+        }catch(e){ alert(e.message); linkBtn.disabled=false; }
+      };
+      btns.push(linkBtn);
+
       const fileInput = document.createElement('input');
       fileInput.type='file'; fileInput.accept='image/png,image/jpeg,application/pdf'; fileInput.style.display='none';
-      const upBtn = document.createElement('button'); upBtn.className='btn sm' + (m.formPath?' ghost':''); upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
+      const upBtn = document.createElement('button'); upBtn.className='btn sm ghost'; upBtn.textContent = m.formPath ? 'Replace uploaded file' : '⬆ Upload file instead';
       fileInput.onchange = async ()=>{
         const picked = fileInput.files[0];
         if(!picked) return;
@@ -4169,7 +4190,7 @@ function renderMembership(el){
         const file = await compressImageFile(picked);
         if(file.size > UPLOAD_LIMIT_BYTES){
           alert('That file is ' + (file.size/1024/1024).toFixed(1) + 'MB, over the 4MB upload limit. Re-scan it as a JPG/PNG photo or at a lower resolution.');
-          upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
+          upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace uploaded file' : '⬆ Upload file instead';
           return;
         }
         try{
@@ -4177,7 +4198,7 @@ function renderMembership(el){
           const i = state.members.findIndex(x=>x.id===m.id);
           if(i>=0) state.members[i] = mapMember(member);
           render();
-        }catch(e){ alert(e.message); upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form'; }
+        }catch(e){ alert(e.message); upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace uploaded file' : '⬆ Upload file instead'; }
       };
       upBtn.onclick = ()=>fileInput.click();
       btns.push(upBtn, fileInput);
@@ -4185,30 +4206,89 @@ function renderMembership(el){
     return btns;
   }
 
+  // Saves one operational detail (t-shirt size, source, or a released date)
+  // that the POS upload doesn't carry — set per member, from the list, once
+  // known. Shared by the date and dropdown inputs below.
+  async function saveMemberDetail(m, field, value){
+    const res = await fetch(`/api/members/${m.id}/details`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ [field]: value }),
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+    const i = state.members.findIndex(x=>x.id===m.id);
+    if(i>=0) state.members[i] = mapMember(data.member);
+  }
+
+  // Read-only text for non-admins; otherwise an inline control that saves
+  // immediately on change.
+  function releaseDateInput(m, prop, field){
+    if(!(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin')){
+      const span = document.createElement('span'); span.textContent = fmtDate(m[prop]) || '—';
+      return span;
+    }
+    const input = document.createElement('input');
+    input.type='date'; input.value = m[prop] || ''; input.style.width='135px';
+    input.onchange = async ()=>{
+      input.disabled = true;
+      try{ await saveMemberDetail(m, field, input.value || null); }
+      catch(e){ alert(e.message); }
+      input.disabled = false;
+    };
+    return input;
+  }
+
+  function detailSelectInput(m, prop, field, options){
+    if(!(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin')){
+      const span = document.createElement('span'); span.textContent = m[prop] || '—';
+      return span;
+    }
+    const sel = document.createElement('select');
+    sel.innerHTML = '<option value="">—</option>' + options.map(o=>`<option ${m[prop]===o?'selected':''}>${o}</option>`).join('');
+    sel.onchange = async ()=>{
+      sel.disabled = true;
+      try{ await saveMemberDetail(m, field, sel.value); }
+      catch(e){ alert(e.message); }
+      sel.disabled = false;
+    };
+    return sel;
+  }
+
   if(state.memberView==='list'){
     const wrap = document.createElement('div'); wrap.style.overflowX='auto';
     const table = document.createElement('table'); table.className='simple';
     table.innerHTML = `<thead><tr>
-      <th>Name</th><th>Branch</th><th>Member no.</th><th>Contact</th><th>Status</th>
-      <th>Membership date</th><th>Expiry date</th><th>T-shirt</th><th>Source</th><th>Standing</th><th></th>
+      <th>Name</th><th>Branch</th><th>Member no.</th><th>Contact no.</th><th>Email</th><th>Membership type</th>
+      <th>Membership date</th><th>Expiry date</th><th>Amount</th><th>T-shirt size</th><th>T-shirt released</th>
+      <th>Keyfob released</th><th>Source</th><th>Standing</th><th>Remarks</th><th></th>
     </tr></thead><tbody></tbody>`;
     const tbody = table.querySelector('tbody');
     list.forEach(m=>{
       const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge neutral">no form</span>'} ${m.needsReview?'<span class="badge flag">review</span>':''}</td>
+        <td>${escapeHtml(m.name)} ${(m.formPath||m.formUrl)?'':'<span class="badge neutral">no form</span>'} ${m.needsReview?'<span class="badge flag">review</span>':''}</td>
         <td>${escapeHtml(m.branch||'')}</td>
         <td>${escapeHtml(m.memberNo||'')}</td>
         <td>${escapeHtml(m.contact||'')}</td>
+        <td>${escapeHtml(m.email||'')}</td>
         <td>${escapeHtml(m.status||'')}</td>
         <td>${fmtDate(m.startDate)}</td>
         <td>${fmtDate(m.expiryDate)}</td>
-        <td>${escapeHtml(m.tshirtSize||'')}</td>
-        <td>${escapeHtml(m.source||'')}</td>
+        <td>${fmtMoney(m.amount).replace('PHP ','')}</td>
+        <td></td>
+        <td></td>
+        <td>${m.branch==='Malabon' ? '' : 'N/A'}</td>
+        <td></td>
         <td><span class="badge ${badgeClass}">${m.computed}</span></td>
+        <td>${escapeHtml(m.remarks||'')}</td>
         <td></td>
       `;
+      const cells = tr.children;
+      cells[9].appendChild(detailSelectInput(m, 'tshirtSize', 'tshirtSize', MEMBER_TSHIRT_OPTIONS));
+      cells[10].appendChild(releaseDateInput(m, 'tshirtReleasedDate', 'tshirtReleasedDate'));
+      if(m.branch==='Malabon') cells[11].appendChild(releaseDateInput(m, 'keyfobReleasedDate', 'keyfobReleasedDate'));
+      cells[12].appendChild(detailSelectInput(m, 'source', 'source', MEMBER_SOURCE_OPTIONS));
       const actionsTd = tr.lastElementChild;
       actionsTd.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
       memberActionButtons(m).forEach(b=>actionsTd.appendChild(b));
@@ -4226,7 +4306,7 @@ function renderMembership(el){
     card.innerHTML = `
       <div class="req-top">
         <div>
-          <div class="req-title">${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge neutral">no form on file</span>'} ${m.needsReview?'<span class="badge flag">needs review</span>':''}</div>
+          <div class="req-title">${escapeHtml(m.name)} ${(m.formPath||m.formUrl)?'':'<span class="badge neutral">no form on file</span>'} ${m.needsReview?'<span class="badge flag">needs review</span>':''}</div>
           <div class="req-sub">${subBits.join(' &middot; ')}</div>
         </div>
         <span class="badge ${badgeClass}">${m.computed}</span>
@@ -4264,22 +4344,34 @@ async function compressImageFile(file, maxDim = 2000, quality = 0.82){
   }
 }
 
-const MEMBER_SOURCE_OPTIONS = ['Walk-in','Online Inquiries','Referral','Old Client','Facebook','Other'];
+const MEMBER_SOURCE_OPTIONS = ['Referral','Online Inquiries','Walk-Ins','Admin Page/Group','Old Client'];
 const MEMBER_TSHIRT_OPTIONS = ['Small','Medium','Large','XL','XXL'];
+const MEMBER_STATUS_OPTIONS = ['New','Renewal'];
+
+// Matches a raw report value to one of a fixed dropdown's options (case/
+// whitespace-insensitive, substring-tolerant); '' if nothing close enough
+// so the admin picks it manually in the grid instead of silently guessing.
+function matchOption(raw, options){
+  const v = String(raw==null?'':raw).trim().toLowerCase();
+  if(!v) return '';
+  const exact = options.find(o=>o.toLowerCase()===v);
+  if(exact) return exact;
+  const partial = options.find(o=>o.toLowerCase().includes(v) || v.includes(o.toLowerCase()));
+  return partial || '';
+}
 
 // Required fields for a row before it can be uploaded — mirrors
 // lib/members.js validateMemberRow() server-side (kept in sync manually;
 // app.js is a plain script, not an ES module, so it can't import that file).
+// T-shirt/keyfob released dates are deliberately not checked here — they're
+// set later, per member, once the item is actually handed over (see
+// memberActionButtons' release-date inputs), not at upload time.
 function memberRowMissingFields(r){
   const missing = [];
   if(!r.name) missing.push('name');
   if(!r.branch) missing.push('branch');
   if(!r.startDate) missing.push('membership date');
-  if(!r.tshirtSize) missing.push('t-shirt size');
-  if(!r.source) missing.push('source');
   if(!(Number(r.amount) > 0)) missing.push('amount paid');
-  if(!r.tshirtReleasedDate) missing.push('t-shirt released date');
-  if(r.branch==='Malabon' && !r.keyfobReleasedDate) missing.push('keyfob released date');
   return missing;
 }
 
@@ -4340,23 +4432,24 @@ function renderNewMemberModal(modal){
 
   const GUESS = {
     name: /name/i, branch: /branch/i, date: /date/i, amount: /amount|paid|price/i,
-    status: /status|new.*renew/i, source: /source/i, memberNo: /member.*(no|id|#)|member.?number/i, contact: /mobile|contact|phone|e-?mail/i,
+    status: /status|new.*renew|membership.?type/i, memberNo: /member.*(no|id|#)|member.?number/i,
+    phone: /mobile|contact|phone|cell/i, email: /e-?mail/i,
   };
   const guessCol = (re)=> headers.find(h=>re.test(h)) || '';
 
   function showStep2(){
     const opts = (sel)=> '<option value="">— none —</option>' + headers.map(h=>`<option value="${escapeHtml(h)}" ${h===sel?'selected':''}>${escapeHtml(h)}</option>`).join('');
     wrap.innerHTML = `
-      <div class="notice">Found ${rawRows.length} row(s). Match the report's columns to these fields — the ones with * are needed to build the member list; the rest can be filled in per row on the next step.</div>
+      <div class="notice">Found ${rawRows.length} row(s). Match the report's columns to these fields — T-shirt size, Source, and the released dates aren't part of this report, so you'll set those per member from the list afterward. Fields with * are required.</div>
       <div class="form-grid">
         <div class="field"><label>Name *</label><select id="map-name">${opts(guessCol(GUESS.name))}</select></div>
         <div class="field"><label>Branch *</label><select id="map-branch">${opts(guessCol(GUESS.branch))}</select></div>
         <div class="field"><label>Membership date *</label><select id="map-date">${opts(guessCol(GUESS.date))}</select></div>
         <div class="field"><label>Amount paid</label><select id="map-amount">${opts(guessCol(GUESS.amount))}</select></div>
-        <div class="field"><label>Membership status (New/Renew)</label><select id="map-status">${opts(guessCol(GUESS.status))}</select></div>
-        <div class="field"><label>Source</label><select id="map-source">${opts(guessCol(GUESS.source))}</select></div>
+        <div class="field"><label>Membership type (New/Renewal)</label><select id="map-status">${opts(guessCol(GUESS.status))}</select></div>
         <div class="field"><label>Member no.</label><select id="map-memberNo">${opts(guessCol(GUESS.memberNo))}</select></div>
-        <div class="field"><label>Contact</label><select id="map-contact">${opts(guessCol(GUESS.contact))}</select></div>
+        <div class="field"><label>Contact number</label><select id="map-phone">${opts(guessCol(GUESS.phone))}</select></div>
+        <div class="field"><label>Email address</label><select id="map-email">${opts(guessCol(GUESS.email))}</select></div>
       </div>
       <div id="mb-map-error"></div>
       <div class="action-row">
@@ -4371,7 +4464,7 @@ function renderNewMemberModal(modal){
   function buildRows(){
     const get = (id)=>wrap.querySelector('#'+id).value;
     const cName=get('map-name'), cBranch=get('map-branch'), cDate=get('map-date'), cAmount=get('map-amount'),
-          cStatus=get('map-status'), cSource=get('map-source'), cMemberNo=get('map-memberNo'), cContact=get('map-contact');
+          cStatus=get('map-status'), cMemberNo=get('map-memberNo'), cPhone=get('map-phone'), cEmail=get('map-email');
     const errEl = wrap.querySelector('#mb-map-error'); errEl.innerHTML='';
     if(!cName || !cBranch || !cDate){ errEl.innerHTML = '<div class="notice err">Name, Branch, and Membership date must be matched to a column to continue.</div>'; return; }
     rows = rawRows.map((r,i)=>({
@@ -4380,11 +4473,10 @@ function renderNewMemberModal(modal){
       branch: normBranch(r[cBranch]),
       startDate: fmtCellDate(r[cDate]),
       amount: cAmount ? (parseFloat(r[cAmount])||0) : 600,
-      status: (cStatus && /renew/i.test(String(r[cStatus]))) ? 'Renew' : 'New',
-      source: cSource ? String(r[cSource]==null?'':r[cSource]).trim() : '',
+      status: (cStatus && /renew/i.test(String(r[cStatus]))) ? 'Renewal' : 'New',
       memberNo: cMemberNo ? String(r[cMemberNo]==null?'':r[cMemberNo]).trim() : '',
-      contact: cContact ? String(r[cContact]==null?'':r[cContact]).trim() : '',
-      tshirtSize:'', tshirtReleasedDate:'', keyfobReleasedDate:'',
+      contact: cPhone ? String(r[cPhone]==null?'':r[cPhone]).trim() : '',
+      email: cEmail ? String(r[cEmail]==null?'':r[cEmail]).trim() : '',
       skip:false, dup:null, removed:false,
     })).filter(r=>r.name);
     if(!rows.length){ errEl.innerHTML = '<div class="notice err">No rows had a name in the matched column — check your column choices.</div>'; return; }
@@ -4401,14 +4493,10 @@ function renderNewMemberModal(modal){
         <td><select class="f-branch"><option ${r.branch==='Manila'?'selected':''}>Manila</option><option ${r.branch==='Malabon'?'selected':''}>Malabon</option></select></td>
         <td><input class="f-date" type="date" value="${r.startDate||''}" style="width:135px;"></td>
         <td><input class="f-amount" type="number" min="0" step="0.01" value="${r.amount}" style="width:85px;"></td>
-        <td><select class="f-status"><option ${r.status==='New'?'selected':''}>New</option><option ${r.status==='Renew'?'selected':''}>Renew</option></select></td>
-        <td><select class="f-source"><option value="">—</option>${MEMBER_SOURCE_OPTIONS.map(s=>`<option ${r.source===s?'selected':''}>${s}</option>`).join('')}</select></td>
-        <td><select class="f-tshirt"><option value="">—</option>${MEMBER_TSHIRT_OPTIONS.map(s=>`<option ${r.tshirtSize===s?'selected':''}>${s}</option>`).join('')}</select></td>
-        <td><input class="f-tshirtdate" type="date" value="${r.tshirtReleasedDate||''}" style="width:135px;"></td>
-        <td class="keyfob-cell" style="display:${r.branch==='Malabon'?'':'none'};"><input class="f-keyfobdate" type="date" value="${r.keyfobReleasedDate||''}" style="width:135px;"></td>
-        <td class="keyfob-na" style="display:${r.branch==='Malabon'?'none':''};color:var(--ink-2);">N/A</td>
+        <td><select class="f-status">${MEMBER_STATUS_OPTIONS.map(s=>`<option ${r.status===s?'selected':''}>${s}</option>`).join('')}</select></td>
         <td><input class="f-memberno" value="${escapeHtml(r.memberNo)}" style="width:90px;"></td>
-        <td><input class="f-contact" value="${escapeHtml(r.contact)}" style="width:130px;"></td>
+        <td><input class="f-contact" value="${escapeHtml(r.contact)}" style="width:120px;" placeholder="Contact no."></td>
+        <td><input class="f-email" value="${escapeHtml(r.email)}" style="width:150px;" placeholder="Email"></td>
         <td>${dupBadge}</td>
         <td><button class="btn sm ghost f-remove" type="button">&times;</button></td>
       </tr>
@@ -4424,15 +4512,10 @@ function renderNewMemberModal(modal){
       el.addEventListener('input', ()=>{ r[prop] = parse ? parse(el.value) : el.value; });
     };
     on('.f-name','name'); on('.f-date','startDate'); on('.f-amount','amount',v=>parseFloat(v)||0);
-    on('.f-status','status'); on('.f-source','source'); on('.f-tshirt','tshirtSize');
-    on('.f-tshirtdate','tshirtReleasedDate'); on('.f-keyfobdate','keyfobReleasedDate');
-    on('.f-memberno','memberNo'); on('.f-contact','contact');
+    on('.f-status','status');
+    on('.f-memberno','memberNo'); on('.f-contact','contact'); on('.f-email','email');
     const branchSel = tr.querySelector('.f-branch');
-    branchSel.addEventListener('change', ()=>{
-      r.branch = branchSel.value;
-      tr.querySelector('.keyfob-cell').style.display = r.branch==='Malabon' ? '' : 'none';
-      tr.querySelector('.keyfob-na').style.display = r.branch==='Malabon' ? 'none' : '';
-    });
+    branchSel.addEventListener('change', ()=>{ r.branch = branchSel.value; });
     const skipEl = tr.querySelector('.f-skip');
     if(skipEl) skipEl.addEventListener('change', ()=>{ r.skip = skipEl.checked; });
     tr.querySelector('.f-remove').onclick = ()=>{ r.removed = true; renderGrid(); };
@@ -4446,8 +4529,8 @@ function renderNewMemberModal(modal){
       <div style="overflow-x:auto;">
         <table class="simple">
           <thead><tr>
-            <th>#</th><th>Name</th><th>Branch</th><th>Date</th><th>Amount</th><th>Status</th><th>Source</th>
-            <th>T-shirt size</th><th>T-shirt released</th><th>Keyfob released</th><th></th><th>Member no.</th><th>Contact</th><th>Duplicate</th><th></th>
+            <th>#</th><th>Name</th><th>Branch</th><th>Date</th><th>Amount</th><th>Membership type</th>
+            <th>Member no.</th><th>Contact no.</th><th>Email</th><th>Duplicate</th><th></th>
           </tr></thead>
           <tbody>${active.map((r)=>rowHtml(r, rows.indexOf(r))).join('')}</tbody>
         </table>
@@ -4500,8 +4583,7 @@ function renderNewMemberModal(modal){
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ rows: active.map(r=>({
           name:r.name, branch:r.branch, startDate:r.startDate, amount:r.amount, status:r.status,
-          source:r.source, tshirtSize:r.tshirtSize, tshirtReleasedDate:r.tshirtReleasedDate,
-          keyfobReleasedDate:r.keyfobReleasedDate||null, memberNo:r.memberNo, contact:r.contact, plan:'Annual',
+          memberNo:r.memberNo, contact:r.contact, email:r.email, plan:'Annual',
         })) }),
       });
       const data = await res.json().catch(()=>({}));
@@ -4523,7 +4605,7 @@ function renderNewMemberModal(modal){
 
   function showStep3(){
     wrap.innerHTML = `
-      <div class="notice">Fill in the fields a POS report won't carry (t-shirt size/date, keyfob date for Malabon, source), remove any junk rows, then check for duplicates before saving.</div>
+      <div class="notice">Check the auto-filled fields, remove any junk rows, then check for duplicates before saving. T-shirt size, Source, and the released dates aren't set here — you'll fill those in per member from the list afterward, once known.</div>
       <div id="mb-grid-wrap"></div>
       <div class="action-row" style="margin-top:10px;">
         <button class="btn ghost" id="mb-back2" type="button">&larr; Re-map columns</button>
