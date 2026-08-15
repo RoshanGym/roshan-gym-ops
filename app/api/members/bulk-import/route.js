@@ -52,6 +52,7 @@ export const POST = withApi(async (req) => {
         id,
         name: String(row.name).trim(),
         contact: row.contact || '',
+        email: row.email || '',
         plan,
         start_date: row.startDate,
         expiry_date: expiry,
@@ -65,7 +66,7 @@ export const POST = withApi(async (req) => {
         keyfob_released_date: row.keyfobReleasedDate || null,
         member_no: row.memberNo || '',
         created_by: session.name,
-        history: [{ date: row.startDate, amount, action: status === 'Renew' ? 'Renewal' : 'New', newExpiry: expiry, by: session.name }],
+        history: [{ date: row.startDate, amount, action: status === 'Renewal' ? 'Renewal' : 'New', newExpiry: expiry, by: session.name }],
       })
       .select('*')
       .single();
