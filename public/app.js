@@ -3,9 +3,10 @@ const SECTIONS = [
   {key:'po', label:'Purchase orders', sub:'Order merchandise and supplies, tracked end to end.'},
   {key:'pettycash', label:'Petty cash', sub:'Reimbursements for staff, tracked end to end.'},
   {key:'potracker', label:'PO tracker', sub:'PO, check payment, and delivery receipt matched automatically.'},
-  {key:'sales', label:'Sales Dashboard', sub:'Revenue reports, targets, and admin performance.'},
+  {key:'sales', label:'Sales tracker', sub:'Daily revenue by category and payment method.'},
   {key:'membership', label:'Membership tracker', sub:'Active, expiring, and expired memberships.'},
   {key:'trialbooking', label:'FREE Trial Booking', sub:'Online free-trial registrations — approve, reschedule, and send day passes.'},
+  {key:'repository', label:'Repository', sub:'Every PO, check, and receipt in one place.'},
 ];
 
 let state = {
@@ -23,17 +24,11 @@ let state = {
   trialFilter: 'All',
   trialBranch: 'All',
   trialSearch: '',
-  trialQr: null,
   search: '',
   taskFilterDate: todayStr(),
   taskFilterAssignee: 'All',
   salesMonth: monthStr(new Date()),
   memberFilter: 'All',
-  memberView: 'list',
-  memberBranch: 'All',
-  memberStartFrom: '', memberStartTo: '',
-  memberExpiryFrom: '', memberExpiryTo: '',
-  memberSearch: '',
   trackerType: 'All',
   reqStatusFilter: null,
   reqRequestor: null,
@@ -74,24 +69,6 @@ function curUser(){ return state.currentUser; }
 function curName(){ return state.currentUser ? state.currentUser.name : 'Unknown'; }
 function curRole(){ return state.currentUser ? state.currentUser.role : null; }
 function accessTier(role){ return (role==='Supervisor' || role==='Owner') ? 'SuperAdmin' : role; }
-
-// Sales Dashboard access:
-//  'full'   — Super Admins: all tabs, upload, and editing.
-//  'viewer' — Super Admins listed below (e.g. Ela): all tabs but view/filter/sort only.
-//  'admin'  — Admins: only the "Sales by Admin" tab, view only.
-//  'none'   — no access.
-const SALES_VIEW_ONLY = ['ela'];
-function salesRole(){
-  const tier = accessTier(curRole());
-  if(tier==='SuperAdmin'){
-    const u = state.currentUser||{};
-    const un = (u.username||u.name||'').trim().toLowerCase();
-    return SALES_VIEW_ONLY.includes(un) ? 'viewer' : 'full';
-  }
-  if(tier==='Admin') return 'admin';
-  return 'none';
-}
-function canEditSales(){ return salesRole()==='full'; }
 
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function monthStr(d){ return d.toISOString().slice(0,7); }
@@ -230,7 +207,7 @@ function inDateRange(dateStr, from, to){
   if(to && d > to) return false;
   return true;
 }
-function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null, tshirtReleasedDate:m.tshirt_released_date||'', keyfobReleasedDate:m.keyfob_released_date||'', memberNo:m.member_no||'', needsReview:!!m.needs_review, email:m.email||'', formUrl:m.form_url||null}; }
+function mapMember(m){ return {id:m.id, name:m.name, contact:m.contact, plan:m.plan, startDate:m.start_date, expiryDate:m.expiry_date, amount:Number(m.amount||0), createdBy:m.created_by, createdAt:m.created_at, history:m.history||[], branch:m.branch||'', tshirtSize:m.tshirt_size||'', status:m.status||'New', source:m.source||'', remarks:m.remarks||'', formPath:m.form_path||null, formName:m.form_name||null, formUploadedBy:m.form_uploaded_by||null, formUploadedAt:m.form_uploaded_at||null}; }
 function mapProduct(p){ return {id:p.id, item:p.item, cost:Number(p.cost||0), supplierKeys:p.supplier_keys||[], active:p.active}; }
 
 function upsertRequest(mapped){
@@ -262,7 +239,6 @@ async function loadAll(){
     try{ const t = await apiGet('/api/sales/targets'); state.targets = t.targets||[]; }catch(e){ state.targets = []; }
     // Trial bookings load separately too, so a pending migration doesn't break the app.
     try{ const tb = await apiGet('/api/trial-bookings'); state.trialBookings = (tb.bookings||[]).map(mapTrialBooking); }catch(e){ state.trialBookings = []; }
-    try{ state.trialQr = await apiGet('/api/trial-qr'); }catch(e){ state.trialQr = {exists:false}; }
   }catch(e){
     // Could be an expired session — but could also be a real server error
     // (e.g. a pending database migration). Surface it on the login screen
@@ -325,8 +301,6 @@ function renderNav(){
   const el = document.getElementById('nav-admin');
   el.innerHTML = '';
   SECTIONS.forEach(s=>{
-    // Sales Dashboard is Super Admin only.
-    if(s.key==='sales' && salesRole()==='none') return;
     const b = document.createElement('button');
     b.className = 'nav-item' + (state.section===s.key ? ' active':'');
     b.innerHTML = '<span class="nav-dot"></span>' + s.label;
@@ -432,13 +406,10 @@ function renderContent(){
   if(state.section==='po') return renderRequestsSection(el, 'PO');
   if(state.section==='pettycash') return renderRequestsSection(el, 'PettyCash');
   if(state.section==='potracker') return renderPoTracker(el);
-  if(state.section==='sales'){
-    if(salesRole()==='none'){ el.innerHTML='<div class="empty">You don\u2019t have access to the Sales Dashboard.</div>'; return; }
-    return renderSales(el);
-  }
+  if(state.section==='sales') return renderSales(el);
   if(state.section==='membership') return renderMembership(el);
   if(state.section==='trialbooking') return renderTrialBooking(el);
-  if(state.section==='repository'){ state.section='potracker'; return renderPoTracker(el); }
+  if(state.section==='repository') return renderRepository(el);
 }
 
 function divider(){ const d=document.createElement('div'); d.className='divider'; return d; }
@@ -793,23 +764,9 @@ function renderChecklistView(el){
     {label:'Weekly tasks — week of ' + fmtDate(state.checklist.weekStart), freq:'Weekly'},
   ];
   let shownAny = false;
-  const phaseRank = (sec)=>{ const s=(sec||'').toLowerCase();
-    if(s.includes('opening')) return 0;
-    if(s.includes('during')) return 1;
-    if(s.includes('closing')) return 2;
-    return sec ? 3 : 4; };
   groups.forEach(g=>{
-    let list = entries.filter(e=>e.frequency===g.freq && matchesFilter(e));
+    const list = entries.filter(e=>e.frequency===g.freq && matchesFilter(e));
     if(!list.length) return;
-    // Group by phase (Opening → During → Closing → other → none) so tasks added
-    // to a phase join that phase instead of landing at the bottom. Stable within a section.
-    list = list.map((t,i)=>({t,i})).sort((a,b)=>{
-      const ra=phaseRank(a.t.section), rb=phaseRank(b.t.section);
-      if(ra!==rb) return ra-rb;
-      const sa=(a.t.section||'').toLowerCase(), sb=(b.t.section||'').toLowerCase();
-      if(sa!==sb) return sa<sb?-1:1;
-      return a.i-b.i;
-    }).map(x=>x.t);
     shownAny = true;
     const h = document.createElement('div'); h.className='section-head'; h.innerHTML = `<h2>${g.label}</h2>`;
     el.appendChild(h);
@@ -965,39 +922,6 @@ function renderMySummary(el){
   if(state.checkSummary.trend) el.appendChild(trendBars(state.checkSummary.trend));
 }
 
-// Weekday rest days (0=Sun … 6=Sat) — an editable layer saved in this browser.
-// The backend also has a permanent "Rest day" (shift_end_hour=0) set in Staff directory;
-// this adds a specific weekly day off. Seeded with the current schedule.
-const REST_DAY_LS_KEY = 'roshan.restWeekday';
-const DEFAULT_REST_WEEKDAY = { andre:0, emman:6, ela:0, kloe:0, loraine:6 }; // Sun/Sat
-const WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-function loadRestWeekdays(){
-  if(state.restWeekdays) return state.restWeekdays;
-  let o={};
-  try{ if(typeof localStorage!=='undefined'){ const raw=localStorage.getItem(REST_DAY_LS_KEY); if(raw) o=JSON.parse(raw)||{}; } }catch(e){ o={}; }
-  state.restWeekdays=o; return o;
-}
-function saveRestWeekday(staffId, day){
-  const o=loadRestWeekdays();
-  if(day===''||day==null) delete o['id:'+staffId]; else o['id:'+staffId]=Number(day);
-  try{ if(typeof localStorage!=='undefined') localStorage.setItem(REST_DAY_LS_KEY, JSON.stringify(o)); }catch(e){}
-}
-// Resolve a staff's rest weekday: explicit per-id override first, else seeded default by first name.
-function restWeekdayForStaff(staffId, name){
-  const o=loadRestWeekdays();
-  if(Object.prototype.hasOwnProperty.call(o,'id:'+staffId)) return o['id:'+staffId];
-  const low=(name||'').toLowerCase();
-  for(const k of Object.keys(DEFAULT_REST_WEEKDAY)){ if(low.includes(k)) return DEFAULT_REST_WEEKDAY[k]; }
-  return null;
-}
-function isRestDayOn(staffId, name, dateStr, shiftEndHour){
-  if(shiftEndHour===0) return true; // permanent rest set in Staff directory
-  const d=restWeekdayForStaff(staffId, name);
-  if(d==null) return false;
-  const dt=new Date(dateStr+'T00:00:00');
-  return dt.getDay()===d;
-}
-
 function renderTeamOverview(el){
   if(!state.checklistDate) state.checklistDate = todayStr();
   const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
@@ -1034,14 +958,11 @@ function renderTeamOverview(el){
     return;
   }
 
-  const date = state.checklistDate;
-  const per = state.checkSummary.perStaff.filter(p=>{ const s=(state.staff||[]).find(x=>x.id===p.staffId); return !s || s.active!==false; });
+  const per = state.checkSummary.perStaff;
   if(!per.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No staff have checklist templates yet. Use "Manage templates" to set them up.'; el.appendChild(e); return; }
-  const isRest = (p)=>isRestDayOn(p.staffId, p.name, date, p.shiftEndHour);
-  const working = per.filter(p=>!isRest(p));
 
-  // Escalation alert: admins who still had open daily tasks after shift end (rest days excluded).
-  const escalatedStaff = per.filter(p=>p.escalated && !isRest(p));
+  // Escalation alert: admins who still had open daily tasks after their shift end.
+  const escalatedStaff = per.filter(p=>p.escalated);
   if(escalatedStaff.length){
     const shiftLabel = (h)=> h===0 ? 'rest day' : ((h>12?(h-12):h) + ':00 ' + (h>=12?'PM':'AM'));
     const alert = document.createElement('div'); alert.className='notice err';
@@ -1055,17 +976,16 @@ function renderTeamOverview(el){
     el.appendChild(ok);
   }
 
-  const totalDone = working.reduce((s,p)=>s+p.dailyDone,0);
-  const totalAll = working.reduce((s,p)=>s+p.dailyTotal,0);
-  const fullyDone = working.filter(p=>p.dailyTotal>0 && p.dailyDone===p.dailyTotal).length;
-  const notStarted = working.filter(p=>p.dailyDone===0 && p.dailyTotal>0).length;
-  const restCount = per.length - working.length;
+  const totalDone = per.reduce((s,p)=>s+p.dailyDone,0);
+  const totalAll = per.reduce((s,p)=>s+p.dailyTotal,0);
+  const fullyDone = per.filter(p=>p.dailyTotal>0 && p.dailyDone===p.dailyTotal).length;
+  const notStarted = per.filter(p=>p.dailyDone===0 && p.dailyTotal>0).length;
   const metrics = document.createElement('div'); metrics.className='metrics';
   metrics.innerHTML = `
     <div class="metric"><div class="num">${totalAll?Math.round(totalDone/totalAll*100):0}%</div><div class="lbl">Team daily completion</div></div>
     <div class="metric good"><div class="num">${fullyDone}</div><div class="lbl">Staff fully done today</div></div>
     <div class="metric ${notStarted>0?'flag':''}"><div class="num">${notStarted}</div><div class="lbl">Staff not started</div></div>
-    <div class="metric"><div class="num">${restCount}</div><div class="lbl">On rest day</div></div>
+    <div class="metric"><div class="num">${per.length}</div><div class="lbl">Staff with checklists</div></div>
   `;
   el.appendChild(metrics);
 
@@ -1075,33 +995,18 @@ function renderTeamOverview(el){
   table.innerHTML = '<thead><tr><th>Employee</th><th>Shift end</th><th>Daily tasks</th><th>Progress</th><th>Weekly tasks</th><th>Last completed</th><th></th></tr></thead>';
   const tbody = document.createElement('tbody');
   const shiftLbl = (h)=> h===0 ? 'Rest day' : ((h>12?(h-12):h) + ':00 ' + (h>=12?'PM':'AM'));
-  per.sort((a,b)=>{
-    const ra=isRest(a)?1:0, rb=isRest(b)?1:0; if(ra!==rb) return ra-rb; // rest days last
-    return (b.dailyTotal?b.dailyDone/b.dailyTotal:0) - (a.dailyTotal?a.dailyDone/a.dailyTotal:0);
-  });
+  per.sort((a,b)=> (b.dailyTotal?b.dailyDone/b.dailyTotal:0) - (a.dailyTotal?a.dailyDone/a.dailyTotal:0));
   per.forEach(p=>{
-    const rest = isRest(p);
     const pct = p.dailyTotal ? Math.round(p.dailyDone/p.dailyTotal*100) : 0;
     const tr = document.createElement('tr');
-    if(rest){
-      const wd = restWeekdayForStaff(p.staffId, p.name);
-      const restLbl = (p.shiftEndHour===0 || wd==null) ? 'Rest day' : ('Rest day · '+WEEKDAY_NAMES[wd]);
-      tr.innerHTML = `
-        <td>${escapeHtml(p.name)}</td>
-        <td class="hint">${restLbl}</td>
-        <td><span class="badge neutral">Rest day</span></td>
-        <td class="hint">—</td>
-        <td class="hint">—</td>
-        <td>${p.lastUpdate?fmtDateTime(p.lastUpdate):'—'}</td>`;
-    } else {
-      tr.innerHTML = `
-        <td>${escapeHtml(p.name)}${p.escalated?' <span class="badge flag">escalated</span>':''}</td>
-        <td class="hint">${shiftLbl(p.shiftEndHour!=null?p.shiftEndHour:15)}</td>
-        <td>${p.dailyDone}/${p.dailyTotal}${p.dailySkipped?' <span class="hint">('+p.dailySkipped+' skipped)</span>':''}</td>
-        <td style="min-width:140px;"><div class="bt" style="height:8px;"><div class="bf" style="width:${pct}%;${pct===100?'background:var(--lime);':''}"></div></div></td>
-        <td>${p.weeklyDone}/${p.weeklyTotal}</td>
-        <td>${p.lastUpdate?fmtDateTime(p.lastUpdate):'—'}</td>`;
-    }
+    tr.innerHTML = `
+      <td>${escapeHtml(p.name)}${p.escalated?' <span class="badge flag">escalated</span>':''}</td>
+      <td class="hint">${shiftLbl(p.shiftEndHour!=null?p.shiftEndHour:15)}</td>
+      <td>${p.dailyDone}/${p.dailyTotal}${p.dailySkipped?' <span class="hint">('+p.dailySkipped+' skipped)</span>':''}</td>
+      <td style="min-width:140px;"><div class="bt" style="height:8px;"><div class="bf" style="width:${pct}%;${pct===100?'background:var(--lime);':''}"></div></div></td>
+      <td>${p.weeklyDone}/${p.weeklyTotal}</td>
+      <td>${p.lastUpdate?fmtDateTime(p.lastUpdate):'—'}</td>
+    `;
     const td = document.createElement('td');
     const b = document.createElement('button'); b.className='btn sm'; b.textContent='Open checklist';
     b.onclick = ()=>{ state.checklistStaff = p.staffId; state.checklist=null; state.tasksTab='checklist'; render(); };
@@ -1112,25 +1017,6 @@ function renderTeamOverview(el){
   scroll.appendChild(table);
   card.appendChild(scroll);
   el.appendChild(card);
-
-  // Weekly rest-day editor (Super Admin).
-  const rcard = document.createElement('div'); rcard.className='card';
-  rcard.innerHTML = '<h2 style="font-size:14px;color:#ffffff;margin-bottom:6px;">Weekly rest days</h2>'
-    + '<div class="hint" style="margin-bottom:10px;">Set each person\u2019s day off. On that weekday their checklist won\u2019t count as incomplete or escalate here. Saved in this browser. (A permanent day off and shift-end times are set in Staff directory.)</div>';
-  const rtbl = document.createElement('table'); rtbl.className='simple'; rtbl.style.width='100%';
-  rtbl.innerHTML = '<thead><tr><th>Employee</th><th>Day off</th></tr></thead>';
-  const rtb = document.createElement('tbody');
-  per.forEach(p=>{
-    const tr=document.createElement('tr');
-    const cur = restWeekdayForStaff(p.staffId, p.name);
-    const sel=document.createElement('select'); sel.style.cssText='font-size:12px;padding:4px 6px;';
-    sel.innerHTML = '<option value="">None</option>' + WEEKDAY_NAMES.map((w,i)=>`<option value="${i}" ${cur===i?'selected':''}>${w}</option>`).join('');
-    sel.onchange=()=>{ saveRestWeekday(p.staffId, sel.value===''?null:sel.value); render(); };
-    const td1=document.createElement('td'); td1.textContent=p.name;
-    const td2=document.createElement('td'); td2.appendChild(sel);
-    tr.appendChild(td1); tr.appendChild(td2); rtb.appendChild(tr);
-  });
-  rtbl.appendChild(rtb); rcard.appendChild(rtbl); el.appendChild(rcard);
 }
 
 function renderTemplatesView(el){
@@ -1486,19 +1372,6 @@ function renderNewTaskModal(modal){
   row.appendChild(b); modal.appendChild(row);
 }
 
-// Free-text search across a request's fields (used by PO, Petty Cash, and the tracker).
-function requestSearchText(r){
-  const parts=[r.id, r.title, r.payee, r.supplier, r.requestor, r.createdBy, r.notes, r.branch, r.status,
-    (r.type==='PO'?'purchase order':'petty cash'), String(r.amount), r.paymentMethod,
-    r.check&&r.check.number, r.check&&r.check.bank, r.delivery&&r.delivery.receiptNo, r.pos&&r.pos.reference];
-  (r.lineItems||[]).forEach(li=>parts.push(li.item||li.name||li.description||li.desc));
-  return parts.filter(Boolean).join(' ').toLowerCase();
-}
-function requestMatchesQuery(searchText, q){
-  const toks=(q||'').trim().toLowerCase().split(/\s+/).filter(Boolean);
-  return toks.every(t=>searchText.includes(t));
-}
-
 // ============ PURCHASE ORDERS / PETTY CASH (shared engine) ============
 function computeReqMetrics(type){
   const reqs = activeRequests().filter(r=>r.type===type);
@@ -1524,11 +1397,6 @@ function renderRequestsSection(el, type){
   const head = document.createElement('div'); head.className='section-head';
   head.innerHTML = `<h2>${type==='PO'?'Purchase orders':'Reimbursement requests'}</h2>`;
   const btnGroup = document.createElement('div'); btnGroup.className='toolbar';
-  if(!state.reqSearch) state.reqSearch = {PO:'', PettyCash:''};
-  const searchInput = document.createElement('input');
-  searchInput.type='search'; searchInput.placeholder='Search ' + (type==='PO'?'purchase orders':'petty cash') + '\u2026';
-  searchInput.value = state.reqSearch[type] || ''; searchInput.style.minWidth='220px';
-  btnGroup.appendChild(searchInput);
   if(type==='PO'){
     const supBtn = document.createElement('button'); supBtn.className='btn'; supBtn.textContent='Suppliers directory';
     supBtn.onclick = ()=>{ state.modal = {type:'suppliers'}; render(); };
@@ -1608,14 +1476,7 @@ function renderRequestsSection(el, type){
     }
     el.appendChild(e); return;
   }
-  const listWrap = document.createElement('div'); el.appendChild(listWrap);
-  list.forEach(r=>{ const c=renderReqCard(r); c.dataset.search=requestSearchText(r); listWrap.appendChild(c); });
-  const noMatch = document.createElement('div'); noMatch.className='empty'; noMatch.textContent='No matches for your search.'; noMatch.style.display='none'; el.appendChild(noMatch);
-  const applyReqSearch = ()=>{ const q=searchInput.value||''; let shown=0;
-    [...listWrap.children].forEach(c=>{ const ok=requestMatchesQuery(c.dataset.search||'', q); c.style.display=ok?'':'none'; if(ok)shown++; });
-    noMatch.style.display=shown?'none':''; };
-  searchInput.oninput=()=>{ state.reqSearch[type]=searchInput.value; applyReqSearch(); };
-  applyReqSearch();
+  list.forEach(r=>el.appendChild(renderReqCard(r)));
 }
 
 function renderReqCard(r){
@@ -2233,20 +2094,9 @@ const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'
 function salesBranchOf(s){ return s.branch || ''; }
 
 function renderSales(el){
-  const sr = salesRole();
-  const canEdit = sr==='full';
-  if(!state.salesArea) state.salesArea = 'core';
-
-  // Admins: view-only, and only the "Sales by Admin" report — no area switch, no other tabs.
-  if(sr==='admin'){
-    state.salesArea='core'; state.salesTab='admin';
-    const body=document.createElement('div'); el.appendChild(body);
-    try{ return renderAdminReport(body); }
-    catch(err){ console.error('Sales view error:', err); body.innerHTML='<div class="empty">Could not load this view.</div>'; }
-    return;
-  }
-
   if(!state.salesTab) state.salesTab = 'overview';
+  if(!state.salesArea) state.salesArea = 'core';
+  const isSuper = accessTier(curRole())==='SuperAdmin';
 
   // Top-level area switch: Core Services vs Drinks & Merchandise
   const areaBar = document.createElement('div');
@@ -2266,21 +2116,15 @@ function renderSales(el){
     catch(err){ console.error('Merch view error:', err); body.innerHTML='<div class="empty">Could not load this view.</div>'; return; }
   }
 
-  // Tab bar (Core Services). View reports for everyone; upload/entries/imports only for editors.
+  // Tab bar (Core Services)
   const tabs = document.createElement('div'); tabs.className='toolbar'; tabs.style.marginBottom='18px';
   const tabDefs = [
     {k:'overview', l:'Overview'},
-    {k:'branchperf', l:'Performance per Branch'},
-    {k:'category', l:'Sales by Category'},
-    {k:'item', l:'Sales by Item'},
-    {k:'admin', l:'Sales by Admin'},
+    {k:'reports', l:'Reports'},
+    {k:'upload', l:'Upload POS report'},
+    {k:'entries', l:'Entries'},
   ];
-  if(canEdit){
-    tabDefs.push({k:'upload', l:'Upload POS report'});
-    tabDefs.push({k:'entries', l:'Entries'});
-    tabDefs.push({k:'batches', l:'Manage imports'});
-  }
-  if(!tabDefs.some(t=>t.k===state.salesTab)) state.salesTab='overview';
+  if(isSuper) tabDefs.push({k:'batches', l:'Manage imports'});
   tabDefs.forEach(t=>{
     const b = document.createElement('button');
     b.className = 'btn' + (state.salesTab===t.k?' primary':'');
@@ -2288,22 +2132,13 @@ function renderSales(el){
     b.onclick = ()=>{ state.salesTab = t.k; render(); };
     tabs.appendChild(b);
   });
-  const xbtn=document.createElement('button');
-  xbtn.className='btn'; xbtn.textContent='⬇ Export to Excel';
-  xbtn.style.marginLeft='auto';
-  xbtn.onclick=()=>exportDashboardsToExcel(xbtn);
-  tabs.appendChild(xbtn);
   el.appendChild(tabs);
 
   const body = document.createElement('div');
   el.appendChild(body);
-  ensureReportMonth();
   try{
     if(state.salesTab==='upload') return renderSalesUpload(body);
-    if(state.salesTab==='branchperf') return renderBranchPerf(body);
-    if(state.salesTab==='category') return renderCategoryReport(body);
-    if(state.salesTab==='item') return renderItemReport(body);
-    if(state.salesTab==='admin') return renderAdminReport(body);
+    if(state.salesTab==='reports') return renderSalesReports(body);
     if(state.salesTab==='entries') return renderSalesEntries(body);
     if(state.salesTab==='batches') return renderSalesBatches(body);
     return renderSalesOverview(body);
@@ -2315,63 +2150,125 @@ function renderSales(el){
 
 // ---------- OVERVIEW: metrics + charts + actual vs target ----------
 function renderSalesOverview(el){
-  if(!state.salesPeriod) state.salesPeriod='month';
-  periodFilterBar(el, SKEYS, {branch:true});
-  const branch = state.salesBranch || 'All';
-  const P = resolvePeriod(state.salesPeriod, state.salesMonth, state.salesQuarter);
-  const yr=P.yr;
-  const scoped = salesInPeriod(branch, yr, P.months);
-  const periodTotal = scoped.reduce((s,x)=>s+x.amount,0);
-  const todaySales = state.sales.filter(s=>isPosSale(s)&&isCoreSale(s)&&s.date===todayStr() && (branch==='All'||salesBranchOf(s)===branch));
-  const todayTotal = todaySales.reduce((s,x)=>s+x.amount,0);
-  const t = targetFor(yr, branch, P.months);
-  const minT=t.min, medT=t.med, maxT=t.max;
-  const pctToMin = minT? Math.round(periodTotal/minT*100):0;
-  const periodLabel = P.label;
+  const month = state.salesMonth;
+  const [yr, mo] = month.split('-').map(Number);
+  const branchFilter = state.salesBranch || 'All';
+  if(!state.salesPeriod) state.salesPeriod = 'month';
+  const ytd = state.salesPeriod === 'ytd';
 
-  const metrics=document.createElement('div'); metrics.className='metrics';
-  const overMin=periodTotal-minT;
-  metrics.innerHTML=`
-    <div class="metric good"><div class="num">${money(periodTotal)}</div><div class="lbl">${periodLabel} sales (PHP)</div></div>
-    <div class="metric"><div class="num">${money(todayTotal)}</div><div class="lbl">Today (PHP)</div></div>
-    <div class="metric ${minT&&periodTotal>=minT?'good':'flag'}"><div class="num">${pctToMin}%</div><div class="lbl">of minimum target</div></div>
-    <div class="metric ${overMin>=0?'good':'flag'}"><div class="num">${money(Math.abs(overMin))}</div><div class="lbl">${overMin>=0?'over':'under'} minimum</div></div>`;
+  // Sales set: either the selected month, or Jan..selected-month of that year.
+  const inScope = (s)=>{
+    if(!isPosSale(s) || !isCoreSale(s)) return false; // POS core only
+    if(branchFilter!=='All' && salesBranchOf(s)!==branchFilter) return false;
+    if(ytd) return Number(s.date.slice(0,4))===yr && s.date.slice(0,7)<=month;
+    return s.date.slice(0,7)===month;
+  };
+  const scoped = state.sales.filter(inScope);
+  const monthTotal = scoped.reduce((s,x)=>s+x.amount,0);
+  const todaySales = state.sales.filter(s=>s.date===todayStr() && (branchFilter==='All'||salesBranchOf(s)===branchFilter));
+  const todayTotal = todaySales.reduce((s,x)=>s+x.amount,0);
+
+  // Target: single month, or sum of Jan..selected month for YTD.
+  const tgtBranch = branchFilter==='All'?'All':branchFilter;
+  let minT=0, medT=0, maxT=0;
+  (state.targets||[]).forEach(t=>{
+    if(t.year!==yr || t.branch!==tgtBranch) return;
+    if(ytd ? (t.month<=mo) : (t.month===mo)){
+      minT+=Number(t.min_target); medT+=Number(t.medial_target); maxT+=Number(t.max_target);
+    }
+  });
+  const pctToMin = minT? Math.round(monthTotal/minT*100):0;
+  const periodLabel = ytd ? `YTD (Jan–${MONTH_NAMES[mo-1]} ${yr})` : `${MONTH_NAMES[mo-1]} ${yr}`;
+
+  // Filter bar
+  const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
+  const modeSel = document.createElement('select');
+  modeSel.innerHTML = `<option value="month" ${!ytd?'selected':''}>Single month</option><option value="ytd" ${ytd?'selected':''}>Year to date</option>`;
+  modeSel.onchange = ()=>{ state.salesPeriod = modeSel.value; render(); };
+  bar.appendChild(modeSel);
+  const monthInput = document.createElement('input'); monthInput.type='month'; monthInput.id='ov-month'; monthInput.value=month;
+  bar.appendChild(monthInput);
+  const brSel = document.createElement('select');
+  brSel.innerHTML = ['All','Manila','Malabon'].map(b=>`<option value="${b}" ${branchFilter===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
+  brSel.onchange = ()=>{ state.salesBranch = brSel.value; render(); };
+  bar.appendChild(brSel);
+  el.appendChild(bar);
+  monthInput.onchange = (e)=>{ state.salesMonth = e.target.value; render(); };
+
+  // Metrics
+  const metrics = document.createElement('div'); metrics.className='metrics';
+  const overMin = monthTotal - minT;
+  metrics.innerHTML = `
+    <div class="metric good"><div class="num">${fmtMoney(monthTotal).replace('PHP ','')}</div><div class="lbl">${periodLabel} sales (PHP)</div></div>
+    <div class="metric"><div class="num">${fmtMoney(todayTotal).replace('PHP ','')}</div><div class="lbl">Today (PHP)</div></div>
+    <div class="metric ${minT&&monthTotal>=minT?'good':'flag'}"><div class="num">${pctToMin}%</div><div class="lbl">of ${ytd?'YTD ':''}minimum target</div></div>
+    <div class="metric ${overMin>=0?'good':'flag'}"><div class="num">${fmtMoney(Math.abs(overMin)).replace('PHP ','')}</div><div class="lbl">${overMin>=0?'over':'under'} minimum</div></div>
+  `;
   el.appendChild(metrics);
 
-  if(!state.sales.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No sales yet. Upload a POS report to get started.'; el.appendChild(e); return; }
+  const monthSales = scoped; // charts below use the scoped set
 
-  if(minT){
-    const gaugeCard=document.createElement('div'); gaugeCard.className='card';
-    gaugeCard.innerHTML=`<h2 style="font-size:14px;color:#ffffff;margin-bottom:14px;">Actual vs Target — ${periodLabel}${branch!=='All'?(' · '+branch):''}</h2>`;
-    const gauge=document.createElement('div'); const cap=maxT||1;
-    const seg=(val,color,label)=>{ const pct=Math.min(100,val/cap*100);
-      return `<div style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;font-size:12px;color:#c9d1d9;margin-bottom:3px;"><span>${label}</span><span>${money(val)}</span></div><div class="bt" style="height:10px;position:relative;"><div class="bf" style="width:${pct}%;background:${color};"></div></div></div>`; };
-    gauge.innerHTML=seg(periodTotal, periodTotal>=minT?'var(--lime)':'var(--amber)','Actual')+seg(minT,'rgba(255,255,255,.25)','Minimum target')+seg(medT,'rgba(255,255,255,.25)','Medial target')+seg(maxT,'rgba(255,255,255,.25)','Max target');
-    gaugeCard.appendChild(gauge); el.appendChild(gaugeCard);
+  if(!state.sales.length){
+    const e=document.createElement('div'); e.className='empty'; e.textContent='No sales yet. Upload a POS report to get started.'; el.appendChild(e); return;
   }
 
-  const trendCard=document.createElement('div'); trendCard.className='card';
-  trendCard.innerHTML='<h2 style="font-size:14px;color:#ffffff;margin-bottom:12px;">Monthly actual vs target</h2>';
-  const c1=document.createElement('canvas'); c1.style.maxHeight='260px'; trendCard.appendChild(c1); el.appendChild(trendCard);
-  const catCard=document.createElement('div'); catCard.className='card';
-  catCard.innerHTML='<h2 style="font-size:14px;color:#ffffff;margin-bottom:12px;">Sales by category</h2>';
-  const c2=document.createElement('canvas'); c2.style.maxHeight='260px'; catCard.appendChild(c2); el.appendChild(catCard);
+  // Actual vs Target gauge
+  if(minT){
+    const gaugeCard = document.createElement('div'); gaugeCard.className='card';
+    gaugeCard.innerHTML = `<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:14px;">Actual vs Target — ${periodLabel}${branchFilter!=='All'?(' · '+branchFilter):''}</h2>`;
+    const gauge = document.createElement('div');
+    const cap = maxT||1;
+    const seg = (val,color,label)=>{
+      const pct = Math.min(100, val/cap*100);
+      return `<div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);margin-bottom:3px;"><span>${label}</span><span>${fmtMoney(val).replace('PHP ','')}</span></div>
+        <div class="bt" style="height:10px;position:relative;"><div class="bf" style="width:${pct}%;background:${color};"></div></div></div>`;
+    };
+    gauge.innerHTML =
+      seg(monthTotal, monthTotal>=minT?'var(--lime)':'var(--amber)', 'Actual') +
+      seg(minT, 'rgba(255,255,255,.25)', 'Minimum target') +
+      seg(medT, 'rgba(255,255,255,.25)', 'Medial target') +
+      seg(maxT, 'rgba(255,255,255,.25)', 'Max target');
+    gaugeCard.appendChild(gauge);
+    el.appendChild(gaugeCard);
+  }
 
-  const maSales=scoped.filter(s=>s.category==='MARTIAL ARTS');
-  let c4=null;
-  if(maSales.length){ const maCard=document.createElement('div'); maCard.className='card';
-    maCard.innerHTML='<h2 style="font-size:14px;color:#ffffff;margin-bottom:12px;">Martial arts by discipline</h2>';
-    c4=document.createElement('canvas'); c4.style.maxHeight='220px'; maCard.appendChild(c4); el.appendChild(maCard); }
+  // Chart: monthly trend (actual vs targets across the year)
+  const trendCard = document.createElement('div'); trendCard.className='card';
+  trendCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Monthly actual vs target</h2>';
+  const c1 = document.createElement('canvas'); c1.style.maxHeight='260px'; trendCard.appendChild(c1);
+  el.appendChild(trendCard);
 
-  setTimeout(()=>{ drawTrendChart(c1, yr, branch); drawCategoryChart(c2, scoped); if(c4) drawDisciplineChart(c4, maSales); },30);
+  // Chart: by category (doughnut)
+  const catCard = document.createElement('div'); catCard.className='card';
+  catCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Sales by category</h2>';
+  const c2 = document.createElement('canvas'); c2.style.maxHeight='260px'; catCard.appendChild(c2);
+  el.appendChild(catCard);
 
-  // Actual vs Target numbers per month (replaces Sales-per-admin) — instruction 2
-  monthlyActualVsTargetTable(el, yr, branch, 12);
-  // Actual vs Target per quarter, side by side
-  quarterlyActualVsTarget(el, yr, branch);
-  // Summary & recommendations — instruction 4
-  renderPerfNarrative(el, yr, branch, 12);
+  // Chart: per admin
+  const adminCard = document.createElement('div'); adminCard.className='card';
+  adminCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Sales per admin</h2>';
+  const c3 = document.createElement('canvas'); c3.style.maxHeight='260px'; adminCard.appendChild(c3);
+  el.appendChild(adminCard);
+
+  // Martial arts discipline breakdown (if any)
+  const maSales = monthSales.filter(s=>s.category==='MARTIAL ARTS');
+  if(maSales.length){
+    const maCard = document.createElement('div'); maCard.className='card';
+    maCard.innerHTML = '<h2 style="font-size:14px;color:var(--ink-1);margin-bottom:12px;">Martial arts by discipline</h2>';
+    const c4 = document.createElement('canvas'); c4.style.maxHeight='220px'; maCard.appendChild(c4);
+    el.appendChild(maCard);
+    setTimeout(()=>drawDisciplineChart(c4, maSales), 30);
+  }
+
+  // Draw charts after they're in the DOM
+  setTimeout(()=>{
+    drawTrendChart(c1, yr, branchFilter);
+    drawCategoryChart(c2, monthSales);
+    drawAdminChart(c3, monthSales);
+  }, 30);
 }
+
 function chartColors(n){
   const base = ['#e5231b','#f0a020','#3fb950','#58a6ff','#bc8cff','#f778ba','#56d4dd','#e3b341','#7ee787','#ff9bce'];
   const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
@@ -2382,47 +2279,6 @@ function chartPalette(n){
   const base = ['#c96b6b','#d1a56b','#7fae82','#7f9dc4','#a892c4','#c48fa8','#6faeb2','#c4b07f','#8fbf9a','#b89ca8'];
   const out=[]; for(let i=0;i<n;i++) out.push(base[i%base.length]); return out;
 }
-
-// Force chart text to be light on the dark theme, across Chart.js versions.
-// v3/v4 read Chart.defaults.color; v2 reads Chart.defaults.global.defaultFontColor.
-function applyChartTextDefaults(){
-  if(typeof Chart==='undefined' || !Chart.defaults) return;
-  try{
-    Chart.defaults.color = '#ffffff';
-    if(Chart.defaults.plugins && Chart.defaults.plugins.legend && Chart.defaults.plugins.legend.labels)
-      Chart.defaults.plugins.legend.labels.color = '#ffffff';
-    if(Chart.defaults.global){ Chart.defaults.global.defaultFontColor = '#ffffff'; }
-  }catch(e){}
-}
-applyChartTextDefaults();
-if(typeof window!=='undefined') window.addEventListener('load', applyChartTextDefaults);
-
-// Inline plugin: draw the % share directly on each pie/doughnut slice (white),
-// so users don't have to hover. Self-contained — no external plugin needed.
-const pieLabelPlugin = {
-  id:'pieLabels',
-  afterDatasetsDraw(chart){
-    const ds=chart.data.datasets && chart.data.datasets[0];
-    if(!ds) return;
-    const total=ds.data.reduce((a,b)=>a+(Number(b)||0),0)||1;
-    const meta=chart.getDatasetMeta(0);
-    const ctx=chart.ctx;
-    ctx.save();
-    ctx.fillStyle='#ffffff';
-    ctx.font='600 12px system-ui, sans-serif';
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.shadowColor='rgba(0,0,0,.55)'; ctx.shadowBlur=3;
-    meta.data.forEach((arc,i)=>{
-      const v=Number(ds.data[i])||0;
-      const pct=v/total*100;
-      if(pct<4) return; // skip slivers to avoid clutter
-      let p;
-      try{ p=arc.getCenterPoint(); }catch(e){ p={x:arc.x,y:arc.y}; }
-      ctx.fillText(pct.toFixed(1)+'%', p.x, p.y);
-    });
-    ctx.restore();
-  }
-};
 
 function drawTrendChart(canvas, year, branch){
   if(typeof Chart==='undefined') return;
@@ -2455,7 +2311,6 @@ function drawCategoryChart(canvas, sales){
   if(canvas._chart) canvas._chart.destroy();
   canvas._chart = new Chart(canvas, {
     type:'doughnut',
-    plugins:[pieLabelPlugin],
     data:{ labels, datasets:[{data, backgroundColor:chartPalette(labels.length), borderColor:'#0d0d0f', borderWidth:2}]},
     options:{
       responsive:true, maintainAspectRatio:false,
@@ -2463,14 +2318,13 @@ function drawCategoryChart(canvas, sales){
         legend:{
           position:'right',
           labels:{
-            color:'#ffffff', font:{size:11}, padding:10,
+            color:'#c9d1d9', font:{size:11}, padding:10,
             generateLabels:(chart)=>{
               const d=chart.data.datasets[0].data;
               return chart.data.labels.map((lab,i)=>({
                 text: `${lab}  ${(d[i]/total*100).toFixed(1)}%`,
                 fillStyle: chart.data.datasets[0].backgroundColor[i],
                 strokeStyle: chart.data.datasets[0].backgroundColor[i],
-                fontColor: '#ffffff',
                 index:i
               }));
             }
@@ -2504,8 +2358,8 @@ function drawAdminChart(canvas, sales){
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(c)=>' '+fmtMoney(c.parsed.x)}} },
       scales:{
-        x:{ ticks:{color:'#c9d1d9', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'} },
-        y:{ type:'category', ticks:{color:'#ffffff', font:{size:12}}, grid:{display:false} }
+        x:{ ticks:{color:'#8b949e', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'} },
+        y:{ type:'category', ticks:{color:'#c9d1d9', font:{size:12}}, grid:{display:false} }
       }
     }
   });
@@ -2519,24 +2373,23 @@ function drawDisciplineChart(canvas, maSales){
   canvas._chart = new Chart(canvas, {
     type:'polarArea',
     data:{ labels, datasets:[{data, backgroundColor:chartPalette(labels.length).map(c=>c+'cc')}]},
-    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#ffffff', font:{size:11}}}}, scales:{r:{ticks:{display:false}, grid:{color:'rgba(255,255,255,.08)'}}} }
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right', labels:{color:'#c9d1d9', font:{size:11}}}}, scales:{r:{ticks:{display:false}, grid:{color:'rgba(255,255,255,.08)'}}} }
   });
 }
 
 function chartOpts(){
   return {
     responsive:true, maintainAspectRatio:false,
-    plugins:{legend:{labels:{color:'#ffffff', font:{size:11}}}},
+    plugins:{legend:{labels:{color:'#c9d1d9', font:{size:11}}}},
     scales:{
-      x:{ticks:{color:'#c9d1d9', font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'}},
-      y:{ticks:{color:'#c9d1d9', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'}}
+      x:{ticks:{color:'#8b949e', font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'}},
+      y:{ticks:{color:'#8b949e', font:{size:10}, callback:v=>v>=1000?(v/1000)+'k':v}, grid:{color:'rgba(255,255,255,.05)'}}
     }
   };
 }
 
 // ---------- UPLOAD POS REPORT ----------
 function renderSalesUpload(el){
-  if(!canEditSales()){ const n=document.createElement('div'); n.className='empty'; n.textContent='Uploading POS reports is restricted. You have view-only access to the Sales Dashboard.'; el.appendChild(n); return; }
   const intro = document.createElement('div'); intro.className='notice';
   intro.innerHTML = 'Upload the POS <strong>“Sales Summary by Category”</strong> CSV export after your shift. The system reads the date, staff, and each line, maps them to your tracker categories, and skips merchandise/drinks. You review before anything is saved.';
   el.appendChild(intro);
@@ -2591,7 +2444,7 @@ function renderPosPreview(host, preview){
         <option value="Malabon" ${preview.branch==='Malabon'?'selected':''}>Malabon</option>
       </select></div>
     </div>
-    <div class="hint" style="margin-top:6px;">Core services: <strong>${fmtMoney(preview.keptSum)}</strong> · drinks &amp; merchandise (to merch dashboard): ${fmtMoney(preview.merchSum!=null?preview.merchSum:preview.excludedSum)} · POS grand total: ${preview.grandTotal!=null?fmtMoney(preview.grandTotal):'—'}</div>
+    <div class="hint" style="margin-top:6px;">Sales to import: <strong>${fmtMoney(preview.keptSum)}</strong> · excluded merchandise/drinks: ${fmtMoney(preview.excludedSum)} · POS grand total: ${preview.grandTotal!=null?fmtMoney(preview.grandTotal):'—'}</div>
   `;
   host.appendChild(head);
 
@@ -2821,92 +2674,6 @@ function renderMerchReport(el){
 const SERVICES_ORDER = ['GYM','HIIT','Personal Training','Martial Arts','OTHERS'];
 const QUARTERS = {1:'Q1',2:'Q1',3:'Q1',4:'Q2',5:'Q2',6:'Q2',7:'Q3',8:'Q3',9:'Q3',10:'Q4',11:'Q4',12:'Q4'};
 
-// Per-admin monthly figures. Jan–Jun from the Admin Sales Tracker xlsx; July from the
-// uploaded July POS files (core services + Keyfob/access card as OTHERS). Ela's July is the
-// Manila All-Staff total minus Andre+Mica+Emman. Francis had no July file in the folder.
-const ADMIN_PERF_2026 = {
-  year: 2026,
-  months: [1,2,3,4,5,6,7],
-  admins: {
-    'Andre':   { branch:'Manila',  sales: [510726, 408059, 392215, 608596, 491463, 495741, 483011], target: [425000, 425000, 425000, 500000, 425000, 425000, 425000] },
-    'Mica':    { branch:'Manila',  sales: [321623, 286770, 529497, 511746, 245313, 340170, 103237], target: [425000, 425000, 425000, 500000, 425000, 425000, 212500] },
-    'Loraine': { branch:'Malabon', sales: [297010, 285923, 240550, 365530, 294747, 441708, 394564], target: [325000, 325000, 325000, 400000, 325000, 375000, 375000] },
-    'Kloe':    { branch:'Malabon', sales: [361883, 247940, 410304, 448116, 256751,  69000, 219620], target: [325000, 325000, 325000, 400000, 325000, 275000, 375000] },
-    'Francis': { branch:'Malabon', sales: [0, 0, 0, 0, 0, 43849, 0], target: [0, 0, 0, 0, 0, 100000, 0] },
-    'Ela':     { branch:'Manila',  sales: [0, 58970, 31890, 22360, 43367, 22670, 34377], target: [0, 0, 0, 0, 0, 0, 0] },
-    'Emman':   { branch:'Manila',  sales: [0, 0, 0, 0, 0, 0, 189850], target: [0, 0, 0, 0, 0, 0, 212500] },
-  }
-};
-
-// Editable per-admin monthly quotas. Manual edits are layered over the tracker defaults
-// above and saved in this browser (localStorage). Swap load/save for an API later to share.
-const ADMIN_QUOTA_LS_KEY = 'roshan.adminQuota.2026';
-function loadAdminQuotaOverrides(){
-  if(state.adminQuotaOverrides) return state.adminQuotaOverrides;
-  let o={};
-  try{ if(typeof localStorage!=='undefined'){ const raw=localStorage.getItem(ADMIN_QUOTA_LS_KEY); if(raw) o=JSON.parse(raw)||{}; } }catch(e){ o={}; }
-  state.adminQuotaOverrides=o; return o;
-}
-function saveAdminQuotaOverride(name, monthNum, value){
-  const o=loadAdminQuotaOverrides(); const key=name+':'+monthNum;
-  if(value===null||value===undefined||value===''){ delete o[key]; }
-  else o[key]=Number(value)||0;
-  try{ if(typeof localStorage!=='undefined') localStorage.setItem(ADMIN_QUOTA_LS_KEY, JSON.stringify(o)); }catch(e){}
-}
-function adminTargetFor(name, monthNum){
-  const o=loadAdminQuotaOverrides(); const key=name+':'+monthNum;
-  if(Object.prototype.hasOwnProperty.call(o,key)) return Number(o[key])||0;
-  const d=ADMIN_PERF_2026.admins[name]; if(!d) return 0;
-  const idx=ADMIN_PERF_2026.months.indexOf(monthNum);
-  return idx>=0 ? (Number(d.target[idx])||0) : 0;
-}
-// Match a POS "Staff" / entered_by value to one of our admin short names.
-// Includes full names/surnames used in the POS exports. Most-specific first so
-// "Michaela..." maps to Mica (not Ela via the "ela" in Marinela).
-const ADMIN_NAME_TOKENS = {
-  Mica:    ['michaela','mica','fernandez'],
-  Emman:   ['emmannoel','emmanoel','emman','dichosa'],
-  Andre:   ['mheki','cortez','andre'],
-  Loraine: ['loraine','parole'],
-  Kloe:    ['kloe','africa'],
-  Francis: ['francis'],
-  Ela:     ['marinela','bonganay','ela'],
-};
-function adminOfName(enteredBy){
-  const s=(enteredBy||'').trim().toLowerCase(); if(!s) return null;
-  for(const name of Object.keys(ADMIN_PERF_2026.admins)){ if(s===name.toLowerCase()) return name; }
-  for(const name of ['Mica','Emman','Andre','Loraine','Kloe','Francis','Ela']){
-    if(ADMIN_NAME_TOKENS[name].some(tok=>s.includes(tok))) return name;
-  }
-  return null;
-}
-// An admin's sales for a month: embedded (Jan–Jul) or, from Aug on, the uploaded POS report.
-function adminSalesForMonth(name, monthNum){
-  const perf=ADMIN_PERF_2026; const idx=perf.months.indexOf(monthNum);
-  if(idx>=0) return Number(perf.admins[name].sales[idx])||0;
-  let sum=0;
-  state.sales.forEach(s=>{
-    if(!isPosSale(s)||!isCoreSale(s)) return;
-    if(Number(s.date.slice(0,4))!==perf.year) return;
-    if(Number(s.date.slice(5,7))!==monthNum) return;
-    if(adminOfName(s.enteredBy)!==name) return;
-    sum+=s.amount;
-  });
-  return sum;
-}
-// Months to show: embedded Jan–Jul plus any later month that has uploaded per-admin POS sales.
-function effectiveAdminMonths(){
-  const perf=ADMIN_PERF_2026; const set=new Set(perf.months);
-  const maxEmb=Math.max.apply(null, perf.months);
-  state.sales.forEach(s=>{
-    if(!isPosSale(s)||!isCoreSale(s)) return;
-    if(Number(s.date.slice(0,4))!==perf.year) return;
-    const m=Number(s.date.slice(5,7));
-    if(m>maxEmb && adminOfName(s.enteredBy)) set.add(m);
-  });
-  return [...set].sort((a,b)=>a-b);
-}
-
 function renderSalesReports(el){
   if(!state.reportWhich) state.reportWhich = 'category';
   if(!state.reportBranch) state.reportBranch = 'All';
@@ -3070,14 +2837,12 @@ function reportMonthVsMonth(host){
 }
 
 // ---- Report 4: sales vs target (monthly / quarterly / yearly) ----
-function reportVsTarget(host, opts){
-  opts=opts||{};
-  const showChart=opts.chart!==false, showTitle=opts.title!==false;
+function reportVsTarget(host){
   const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch, period=state.reportPeriod;
   let buckets=[];
-  if(period==='quarter'){ buckets=[{label:'Q1',months:[1,2,3]},{label:'Q2',months:[4,5,6]},{label:'Q3',months:[7,8,9]},{label:'Q4',months:[10,11,12]}]; }
-  else if(period==='ytd'){ const endM=Number(state.reportMonth.slice(5,7)); for(let m=1;m<=endM;m++) buckets.push({label:MONTH_NAMES[m-1],months:[m]}); }
-  else { for(let m=1;m<=12;m++) buckets.push({label:MONTH_NAMES[m-1],months:[m]}); }
+  if(period==='month'){ for(let m=1;m<=12;m++) buckets.push({label:MONTH_NAMES[m-1],months:[m]}); }
+  else if(period==='quarter'){ buckets=[{label:'Q1',months:[1,2,3]},{label:'Q2',months:[4,5,6]},{label:'Q3',months:[7,8,9]},{label:'Q4',months:[10,11,12]}]; }
+  else buckets=[{label:String(yr),months:[1,2,3,4,5,6,7,8,9,10,11,12]}];
 
   const rows=buckets.map(bk=>{
     const actual=bk.months.reduce((sum,m)=>sum+salesInScope(branch,`${yr}-${String(m).padStart(2,'0')}`).reduce((a,b)=>a+b.amount,0),0);
@@ -3086,20 +2851,18 @@ function reportVsTarget(host, opts){
   }).filter(r=>r.actual>0 || r.min>0);
 
   const totActual=rows.reduce((a,b)=>a+b.actual,0), totMin=rows.reduce((a,b)=>a+b.min,0);
-  if(showTitle) titleCard(host, `Sales vs Target (${period}) — ${yr}${branch!=='All'?' · '+branch:''}`, totActual,
+  titleCard(host, `Sales vs Target (${period}) — ${yr}${branch!=='All'?' · '+branch:''}`, totActual,
     totMin?`${(totActual/totMin*100).toFixed(1)}% of minimum target`:'');
 
-  if(showChart){
-    const card=sectionCard(host,'Actual vs targets');
-    const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; card.appendChild(cv);
-    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-      cv._c=new Chart(cv,{data:{labels:rows.map(r=>r.label),datasets:[
-        {type:'bar',label:'Actual',data:rows.map(r=>r.actual),backgroundColor:rows.map(r=>r.actual>=r.min&&r.min>0?'#7fae82':'#c96b6b'),borderRadius:4,order:3},
-        {type:'line',label:'Min',data:rows.map(r=>r.min),borderColor:'#d1a56b',borderWidth:2,pointRadius:0,tension:.2,order:1},
-        {type:'line',label:'Medial',data:rows.map(r=>r.med),borderColor:'#7f9dc4',borderWidth:1.5,borderDash:[5,4],pointRadius:0,order:1},
-        {type:'line',label:'Max',data:rows.map(r=>r.max),borderColor:'#a892c4',borderWidth:1.5,borderDash:[2,3],pointRadius:0,order:1},
-      ]},options:barOpts()});},30);
-  }
+  const card=sectionCard(host,'Actual vs targets');
+  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; card.appendChild(cv);
+  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
+    cv._c=new Chart(cv,{data:{labels:rows.map(r=>r.label),datasets:[
+      {type:'bar',label:'Actual',data:rows.map(r=>r.actual),backgroundColor:rows.map(r=>r.actual>=r.min&&r.min>0?'#7fae82':'#c96b6b'),borderRadius:4,order:3},
+      {type:'line',label:'Min',data:rows.map(r=>r.min),borderColor:'#d1a56b',borderWidth:2,pointRadius:0,tension:.2,order:1},
+      {type:'line',label:'Medial',data:rows.map(r=>r.med),borderColor:'#7f9dc4',borderWidth:1.5,borderDash:[5,4],pointRadius:0,order:1},
+      {type:'line',label:'Max',data:rows.map(r=>r.max),borderColor:'#a892c4',borderWidth:1.5,borderDash:[2,3],pointRadius:0,order:1},
+    ]},options:barOpts()});},30);
 
   const tcard=sectionCard(host,'Detail');
   tableFrom(tcard,['Period','Actual','Min target','vs Min','Attainment','Medial','Max'],
@@ -3114,7 +2877,7 @@ function reportVsTarget(host, opts){
   // Sales drivers: actual sales by service, sorted high-to-low, for the whole period shown
   const allMonths = period==='month' ? [Number(state.reportMonth.slice(5,7))]
     : period==='quarter' ? Object.keys(QUARTERS).filter(m=>QUARTERS[m]===QUARTERS[Number(state.reportMonth.slice(5,7))]).map(Number)
-    : (function(){ const e=Number(state.reportMonth.slice(5,7)); const a=[]; for(let m=1;m<=e;m++)a.push(m); return a; })();
+    : [1,2,3,4,5,6,7,8,9,10,11,12];
   const driverSales = state.sales.filter(s=>isPosSale(s)&&isCoreSale(s)&&Number(s.date.slice(0,4))===yr&&allMonths.includes(Number(s.date.slice(5,7)))&&(branch==='All'||s.branch===branch));
   const bySvc={}; driverSales.forEach(s=>{ const c=SERVICES_ORDER.includes(s.category)?s.category:'OTHERS'; bySvc[c]=(bySvc[c]||0)+s.amount; });
   const dtotal=Object.values(bySvc).reduce((a,b)=>a+b,0)||1;
@@ -3229,652 +2992,6 @@ function reportDataCheck(host){
   n2.innerHTML='<strong>Why two columns can differ:</strong> "Core services (POS)" comes from the POS Sales Breakdown files and drives reports 1–4. "Admin tracker" comes from the Roshan Gym Admin Sales Tracker and drives report 5 only. They cover the same sales from different systems, so small differences are normal.';
   host.appendChild(n2);
 }
-// ===================== SALES DASHBOARD — sub-tab reports =====================
-// Shared helpers for the four report sub-tabs (Performance per Branch, Sales by
-// Category, Sales by Item, Sales by Admin). July is intentionally absent from the
-// loaded POS data and from the admin xlsx, so it stays hidden until uploaded.
-function money(v){ return fmtMoney(v).replace('PHP ',''); }
-function reportEmpty(host){ const e=document.createElement('div'); e.className='empty'; e.textContent='No sales loaded yet.'; host.appendChild(e); }
-function ensureReportMonth(){
-  if(state.reportMonth) return;
-  let latest=null;
-  state.sales.forEach(s=>{ if(!isPosSale(s)||!isCoreSale(s))return; const ym=s.date.slice(0,7);
-    if(!latest||ym>latest)latest=ym; });
-  state.reportMonth = latest || '2026-07';
-}
-function periodMonths(period, ym){
-  const m=Number(ym.slice(5,7));
-  if(period==='quarter'){ const q=QUARTERS[m]; return Object.keys(QUARTERS).filter(k=>QUARTERS[k]===q).map(Number); }
-  if(period==='year'){ return [1,2,3,4,5,6,7,8,9,10,11,12]; }
-  return [m];
-}
-function periodLabelFor(period, ym, yr){
-  if(period==='quarter') return `${QUARTERS[Number(ym.slice(5,7))]} ${yr}`;
-  if(period==='year') return String(yr);
-  return monthLabel(ym);
-}
-function salesInPeriod(branch, yr, monthsArr){
-  return state.sales.filter(s=>{
-    if(!isPosSale(s)||!isCoreSale(s)) return false;
-    if(branch!=='All' && (s.branch||'')!==branch) return false;
-    if(Number(s.date.slice(0,4))!==yr) return false;
-    return monthsArr.includes(Number(s.date.slice(5,7)));
-  });
-}
-function minTargetSeries(yr, branch){
-  const arr=new Array(12).fill(0);
-  const pull=(br)=>{ (state.targets||[]).forEach(t=>{ if(t.year===yr && t.branch===br) arr[t.month-1]=Number(t.min_target)||0; }); };
-  if(branch==='All'){
-    pull('All');
-    if(arr.every(v=>v===0)){
-      const m=new Array(12).fill(0);
-      (state.targets||[]).forEach(t=>{ if(t.year===yr && (t.branch==='Manila'||t.branch==='Malabon')) m[t.month-1]+=Number(t.min_target)||0; });
-      return m;
-    }
-    return arr;
-  }
-  pull(branch); return arr;
-}
-function salesReportFilterBar(host, opts){
-  opts=opts||{};
-  const bar=document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
-  if(opts.branch){
-    const brSel=document.createElement('select');
-    brSel.innerHTML=['All','Manila','Malabon'].map(b=>`<option value="${b}" ${state.reportBranch===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
-    brSel.onchange=()=>{ state.reportBranch=brSel.value; render(); };
-    bar.appendChild(brSel);
-  }
-  if(opts.period){
-    const pSel=document.createElement('select');
-    pSel.innerHTML=[['month','Monthly'],['quarter','Quarterly'],['year','Yearly']].map(([v,l])=>`<option value="${v}" ${state.reportPeriod===v?'selected':''}>${l}</option>`).join('');
-    pSel.onchange=()=>{ state.reportPeriod=pSel.value; render(); };
-    bar.appendChild(pSel);
-  }
-  const mInput=document.createElement('input'); mInput.type='month'; mInput.value=state.reportMonth;
-  mInput.onchange=(e)=>{ state.reportMonth=e.target.value; render(); };
-  bar.appendChild(mInput);
-  host.appendChild(bar);
-}
-
-// ---- Unified period filter: Monthly / Quarterly / YTD (instruction 3) ----
-const RKEYS = {period:'reportPeriod', month:'reportMonth', quarter:'reportQuarter', branch:'reportBranch'};
-const SKEYS = {period:'salesPeriod', month:'salesMonth', quarter:'salesQuarter', branch:'salesBranch'};
-function distinctYears(){
-  const ys=new Set();
-  state.sales.forEach(s=>{ if(isPosSale(s)&&isCoreSale(s)) ys.add(Number(s.date.slice(0,4))); });
-  return ys.size?[...ys].sort():[Number((state.reportMonth||'2026-06').slice(0,4))];
-}
-function resolvePeriod(periodVal, monthVal, quarterVal){
-  monthVal = monthVal || '2026-06';
-  const yr=Number(monthVal.slice(0,4));
-  if(periodVal==='quarter'){
-    const q=quarterVal || QUARTERS[Number(monthVal.slice(5,7))] || 'Q1';
-    const months=Object.keys(QUARTERS).filter(k=>QUARTERS[k]===q).map(Number);
-    return {yr, months, label:`${q} ${yr}`, kind:'quarter', q};
-  }
-  if(periodVal==='ytd'){
-    const endM=Number(monthVal.slice(5,7));
-    const months=[]; for(let m=1;m<=endM;m++) months.push(m);
-    return {yr, months, label:`YTD (Jan–${MONTH_NAMES[endM-1]} ${yr})`, kind:'ytd', endM};
-  }
-  const m=Number(monthVal.slice(5,7));
-  return {yr, months:[m], label:monthLabel(monthVal), kind:'month', m};
-}
-function periodFilterBar(host, keys, opts){
-  opts=opts||{};
-  const bar=document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='16px';
-  if(opts.branch){
-    const brSel=document.createElement('select');
-    brSel.innerHTML=['All','Manila','Malabon'].map(b=>`<option value="${b}" ${state[keys.branch]===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
-    brSel.onchange=()=>{ state[keys.branch]=brSel.value; render(); };
-    bar.appendChild(brSel);
-  }
-  const period=state[keys.period]||'month';
-  const pSel=document.createElement('select');
-  pSel.innerHTML=[['month','Monthly'],['quarter','Quarterly'],['ytd','YTD']].map(([v,l])=>`<option value="${v}" ${period===v?'selected':''}>${l}</option>`).join('');
-  pSel.onchange=()=>{ state[keys.period]=pSel.value; render(); };
-  bar.appendChild(pSel);
-  const cur=state[keys.month]||'2026-06'; const yr=Number(cur.slice(0,4));
-  if(period==='month'){
-    const mInput=document.createElement('input'); mInput.type='month'; mInput.value=cur;
-    mInput.onchange=(e)=>{ state[keys.month]=e.target.value; render(); };
-    bar.appendChild(mInput);
-  } else {
-    const years=distinctYears();
-    const ySel=document.createElement('select');
-    ySel.innerHTML=years.map(y=>`<option value="${y}" ${yr===y?'selected':''}>${y}</option>`).join('');
-    ySel.onchange=(e)=>{ state[keys.month]=e.target.value+'-'+cur.slice(5,7); render(); };
-    bar.appendChild(ySel);
-    if(period==='quarter'){
-      const q=state[keys.quarter] || QUARTERS[Number(cur.slice(5,7))] || 'Q1';
-      const qSel=document.createElement('select');
-      qSel.innerHTML=['Q1','Q2','Q3','Q4'].map(x=>`<option value="${x}" ${q===x?'selected':''}>${x}</option>`).join('');
-      qSel.onchange=()=>{ state[keys.quarter]=qSel.value; render(); };
-      bar.appendChild(qSel);
-    }
-  }
-  host.appendChild(bar);
-}
-
-// Monthly Actual vs Target table (numbers summary) — used in Overview + Branch perf.
-function monthlyActualVsTargetTable(host, yr, branch, endM){
-  endM = endM || 12;
-  const minT=minTargetSeries(yr, branch);
-  const rows=[];
-  let prev=null, totA=0, totMin=0;
-  for(let m=1;m<=endM;m++){
-    const actual=salesInPeriod(branch,yr,[m]).reduce((a,b)=>a+b.amount,0);
-    const min=minT[m-1]||0;
-    if(actual===0 && min===0) continue;
-    const ou=actual-min;
-    const attain=min?(actual/min*100):0;
-    const mom = (prev!==null && prev>0) ? ((actual-prev)/prev*100) : null;
-    rows.push([MONTH_NAMES[m-1], money(actual), money(min),
-      (ou>=0?'+':'')+money(Math.abs(ou)),
-      min?attain.toFixed(0)+'%':'—',
-      mom===null?'—':(mom>=0?'+':'')+mom.toFixed(1)+'%']);
-    totA+=actual; totMin+=min; prev=actual;
-  }
-  const card=sectionCard(host, `Actual vs target by month${branch!=='All'?' · '+branch:''}`);
-  tableFrom(card, ['Month','Actual','Min target','Over/Under','Attainment','MoM Δ'], rows,
-    rows.map((r,i)=>{ const a=parseFloat(r[1].replace(/,/g,'')), mn=parseFloat(r[2].replace(/,/g,'')); return mn?a>=mn:true; }));
-  // summary row
-  const ou=totA-totMin;
-  const sum=document.createElement('div'); sum.className='notice';
-  sum.innerHTML=`<strong>Total:</strong> Actual ${fmtMoney(totA)} vs min target ${fmtMoney(totMin)} — `
-    +`${totMin?(totA/totMin*100).toFixed(1):'—'}% attainment, ${ou>=0?'over':'under'} by ${fmtMoney(Math.abs(ou))}.`;
-  card.appendChild(sum);
-  return {totA, totMin};
-}
-
-// Actual vs Target per quarter, side by side (instruction: overview).
-// Quarters with no loaded sales are skipped (2026 still in progress).
-function quarterlyActualVsTarget(host, yr, branch){
-  const quarters=[{q:'Q1',months:[1,2,3]},{q:'Q2',months:[4,5,6]},{q:'Q3',months:[7,8,9]},{q:'Q4',months:[10,11,12]}];
-  const rows=quarters.map(qq=>{
-    const actual=salesInPeriod(branch,yr,qq.months).reduce((a,b)=>a+b.amount,0);
-    const t=targetFor(yr,branch,qq.months);
-    return {q:qq.q, actual, min:t.min, med:t.med, max:t.max};
-  }).filter(r=>r.actual>0);
-  if(!rows.length) return;
-  const card=sectionCard(host, `Actual vs Target by quarter${branch!=='All'?' · '+branch:''}`);
-  const cv=document.createElement('canvas'); cv.style.maxHeight='300px'; card.appendChild(cv);
-  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{type:'bar',data:{labels:rows.map(r=>r.q),datasets:[
-      {label:'Actual',data:rows.map(r=>r.actual),backgroundColor:rows.map(r=>r.min&&r.actual>=r.min?'#7fae82':'#c96b6b'),borderRadius:4},
-      {label:'Min target',data:rows.map(r=>r.min),backgroundColor:'#d1a56b',borderRadius:4}
-    ]},options:barOpts()});},30);
-  tableFrom(card, ['Quarter','Actual','Min target','Over/Under','Attainment'],
-    rows.map(r=>{ const d=r.actual-r.min; return [r.q, money(r.actual), money(r.min), (d>=0?'+':'')+money(Math.abs(d)), r.min?(r.actual/r.min*100).toFixed(0)+'%':'—']; }),
-    rows.map(r=>r.min?r.actual>=r.min:true));
-  const only=document.createElement('div'); only.className='hint'; only.style.marginTop='6px';
-  only.textContent='Only quarters with loaded sales are shown — 2026 is still in progress.';
-  card.appendChild(only);
-}
-
-// Data-driven performance summary + improvement steps (instruction 4).
-function renderPerfNarrative(host, yr, branch, endM){
-  endM = endM || 12;
-  const minT=minTargetSeries(yr, branch);
-  const mrows=[];
-  for(let m=1;m<=endM;m++){
-    const actual=salesInPeriod(branch,yr,[m]).reduce((a,b)=>a+b.amount,0);
-    const min=minT[m-1]||0;
-    if(actual===0 && min===0) continue;
-    mrows.push({m, actual, min, attain:min?actual/min*100:0});
-  }
-  if(!mrows.length) return;
-  const totA=mrows.reduce((a,b)=>a+b.actual,0), totMin=mrows.reduce((a,b)=>a+b.min,0);
-  const attain=totMin?totA/totMin*100:0;
-  const hit=mrows.filter(r=>r.min&&r.actual>=r.min).length;
-  const withMin=mrows.filter(r=>r.min>0);
-  const best=withMin.slice().sort((a,b)=>b.attain-a.attain)[0];
-  const worst=withMin.slice().sort((a,b)=>a.attain-b.attain)[0];
-  const first=mrows[0], last=mrows[mrows.length-1];
-  const trendPct=first.actual?((last.actual-first.actual)/first.actual*100):0;
-  // top / weakest category over the window
-  const wSales=salesInPeriod(branch,yr,mrows.map(r=>r.m));
-  const byCat={}; wSales.forEach(s=>{ const c=s.category||'OTHERS'; byCat[c]=(byCat[c]||0)+s.amount; });
-  const catPairs=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
-  const topCat=catPairs[0], lowCat=catPairs[catPairs.length-1];
-
-  const card=sectionCard(host,'Summary & recommendations');
-  const p=document.createElement('div'); p.style.cssText='color:var(--ink-1);line-height:1.6;font-size:13px;';
-  const gap=totMin-totA;
-  p.innerHTML =
-    `Through this period, ${branch==='All'?'both branches':branch} booked <strong>${fmtMoney(totA)}</strong> against a minimum target of <strong>${fmtMoney(totMin)}</strong> — `
-    +`<strong>${attain.toFixed(1)}%</strong> attainment, ${gap<=0?'ahead of':'short of'} minimum by ${fmtMoney(Math.abs(gap))}. `
-    +`${hit} of ${mrows.length} month${mrows.length===1?'':'s'} cleared the minimum. `
-    +(best?`Strongest month was <strong>${MONTH_NAMES[best.m-1]}</strong> (${best.attain.toFixed(0)}% of target); weakest was <strong>${MONTH_NAMES[worst.m-1]}</strong> (${worst.attain.toFixed(0)}%). `:'')
-    +`Sales ${trendPct>=0?'rose':'fell'} ${Math.abs(trendPct).toFixed(0)}% from ${MONTH_NAMES[first.m-1]} to ${MONTH_NAMES[last.m-1]}. `
-    +(topCat?`<strong>${topCat[0]}</strong> is the biggest driver (${(topCat[1]/totA*100).toFixed(0)}% of sales)`:'')
-    +(lowCat&&catPairs.length>1?`, while <strong>${lowCat[0]}</strong> trails at ${(lowCat[1]/totA*100).toFixed(0)}%.`:'.');
-  card.appendChild(p);
-
-  const steps=[];
-  if(gap>0){
-    steps.push(`Close the ${fmtMoney(gap)} gap to minimum: at recent run-rate that's roughly ${fmtMoney(gap/Math.max(mrows.length,1))} more per month.`);
-  } else {
-    steps.push(`You're above minimum — push toward the medial/max tier by protecting the months that already over-perform.`);
-  }
-  if(worst && best && worst.attain < best.attain*0.8){
-    steps.push(`Investigate ${MONTH_NAMES[worst.m-1]} (only ${worst.attain.toFixed(0)}% of target) — check staffing, promos, or seasonality versus ${MONTH_NAMES[best.m-1]}.`);
-  }
-  if(topCat) steps.push(`Lean into ${topCat[0]} (your top earner) with renewals/upsells, and build a small campaign to lift ${lowCat&&catPairs.length>1?lowCat[0]:'the lagging services'}.`);
-  if(branch==='All'){
-    const mnlT=salesInPeriod('Manila',yr,mrows.map(r=>r.m)).reduce((a,b)=>a+b.amount,0);
-    const mbnT=salesInPeriod('Malabon',yr,mrows.map(r=>r.m)).reduce((a,b)=>a+b.amount,0);
-    const lag = mnlT<mbnT?'Manila':'Malabon';
-    steps.push(`${lag} is the smaller contributor this period — replicate the stronger branch's winning mix there.`);
-  }
-  const ul=document.createElement('ul'); ul.style.cssText='margin:12px 0 0 18px;color:var(--ink-1);line-height:1.6;font-size:13px;';
-  steps.forEach(s=>{ const li=document.createElement('li'); li.innerHTML=s; ul.appendChild(li); });
-  card.appendChild(ul);
-  const dis=document.createElement('div'); dis.className='hint'; dis.style.marginTop='8px';
-  dis.textContent='Auto-generated from the loaded figures — a starting point for discussion, not financial advice.';
-  card.appendChild(dis);
-}
-
-// ---- Sub-tab 1: Performance per Branch (Month vs Month + Sales vs Target) ----
-function renderBranchPerf(host){
-  periodFilterBar(host, RKEYS, {branch:true});
-  if(!state.sales.length){ reportEmpty(host); return; }
-  const yr=Number(state.reportMonth.slice(0,4)), branch=state.reportBranch;
-  const months=[]; for(let m=1;m<=12;m++) months.push(`${yr}-${String(m).padStart(2,'0')}`);
-  const mnl=months.map(ym=>salesInScope('Manila',ym).reduce((a,b)=>a+b.amount,0));
-  const mbn=months.map(ym=>salesInScope('Malabon',ym).reduce((a,b)=>a+b.amount,0));
-  const both=months.map((_,i)=>mnl[i]+mbn[i]);
-  const scope = branch==='Manila'?mnl : branch==='Malabon'?mbn : both;
-  const scopeTotal=scope.reduce((a,b)=>a+b,0);
-  titleCard(host, `Total Sales Month vs Month — ${yr}${branch!=='All'?' · '+branch:''}`, scopeTotal);
-
-  const minT=minTargetSeries(yr, branch);
-  const card=sectionCard(host,'Monthly totals by branch');
-  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; card.appendChild(cv);
-  const datasets=[];
-  if(branch==='All'){
-    datasets.push({label:'Manila',data:mnl,backgroundColor:'#7f9dc4',borderRadius:4});
-    datasets.push({label:'Malabon',data:mbn,backgroundColor:'#c96b6b',borderRadius:4});
-  } else {
-    datasets.push({label:branch,data:scope,backgroundColor:branch==='Manila'?'#7f9dc4':'#c96b6b',borderRadius:4});
-  }
-  // Minimum-target line replaces the old "Combined" line.
-  datasets.push({type:'line',label:'Min target',data:minT,borderColor:'#d1a56b',borderWidth:2,tension:.2,pointRadius:2});
-  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{type:'bar',data:{labels:MONTH_NAMES,datasets},options:barOpts()});},30);
-
-  const rows=months.map((ym,i)=>{
-    const prev=i>0?scope[i-1]:0;
-    const g=prev?((scope[i]-prev)/prev*100):0;
-    return {name:MONTH_NAMES[i], mnl:mnl[i], mbn:mbn[i], val:scope[i], growth:(i>0&&prev)?(g>=0?'+':'')+g.toFixed(1)+'%':'—'};
-  }).filter(r=>r.val>0);
-  const tcard=sectionCard(host,'Month-on-month growth'+(branch!=='All'?` — ${branch}`:''));
-  if(branch==='All'){
-    tableFrom(tcard,['Month','Manila','Malabon','Combined','MoM growth'],
-      rows.map(r=>[r.name, money(r.mnl), money(r.mbn), money(r.val), r.growth]));
-  } else {
-    tableFrom(tcard,['Month',branch,'MoM growth'], rows.map(r=>[r.name, money(r.val), r.growth]));
-  }
-
-  const div=document.createElement('div'); div.style.cssText='height:1px;background:var(--line);margin:22px 0;'; host.appendChild(div);
-  // Actual performance vs targets as a numbers report (replaces the old bar chart),
-  // then the Detail table and main sales drivers.
-  monthlyActualVsTargetTable(host, yr, branch, 12);
-  reportVsTarget(host, {chart:false, title:false});
-}
-
-// ---- Sub-tab 2: Sales by Category ----
-function renderCategoryReport(host){
-  periodFilterBar(host, RKEYS, {branch:true});
-  if(!state.sales.length){ reportEmpty(host); return; }
-  const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
-  const yr=P.yr, branch=state.reportBranch, mArr=P.months, plabel=P.label;
-  const sales=salesInPeriod(branch, yr, mArr);
-  const by={}; sales.forEach(s=>{ const c=s.category||'OTHERS'; by[c]=(by[c]||0)+s.amount; });
-  const total=Object.values(by).reduce((a,b)=>a+b,0);
-  titleCard(host, `Sales by Category — ${plabel}${branch!=='All'?' · '+branch:''}`, total);
-  const pairs=Object.entries(by).sort((a,b)=>b[1]-a[1]);
-  twoCol(host, (c)=>pieCanvas(c, pairs.map(p=>p[0]), pairs.map(p=>p[1])), (c)=>breakdownTable(c, pairs, total||1));
-
-  // --- Per-category branch comparison, month by month (instruction 6) ---
-  const cats=pairs.map(p=>p[0]);
-  const catOptions = cats.length?cats:['GYM'];
-  if(!state.reportCategory || !catOptions.includes(state.reportCategory)) state.reportCategory = catOptions[0];
-  const selCat = state.reportCategory;
-  const mcard=sectionCard(host, `${selCat} performance by month${branch!=='All'?' · '+branch:' · branch comparison'}`);
-  const cs=document.createElement('select'); cs.style.marginBottom='12px';
-  cs.innerHTML=catOptions.map(c=>`<option value="${escapeHtml(c)}" ${c===selCat?'selected':''}>${escapeHtml(c)}</option>`).join('');
-  cs.onchange=()=>{ state.reportCategory=cs.value; render(); };
-  mcard.appendChild(cs);
-  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
-  const MI=[1,2,3,4,5,6,7,8,9,10,11,12];
-  const catMnl=MI.map(m=>salesInPeriod('Manila',yr,[m]).filter(x=>(x.category||'OTHERS')===selCat).reduce((a,b)=>a+b.amount,0));
-  const catMbn=MI.map(m=>salesInPeriod('Malabon',yr,[m]).filter(x=>(x.category||'OTHERS')===selCat).reduce((a,b)=>a+b.amount,0));
-  const dsets=[];
-  if(branch!=='Malabon') dsets.push({label:'Manila',data:catMnl,backgroundColor:'#7f9dc4',borderRadius:4});
-  if(branch!=='Manila') dsets.push({label:'Malabon',data:catMbn,backgroundColor:'#c96b6b',borderRadius:4});
-  setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{type:'bar',data:{labels:MONTH_NAMES,datasets:dsets},options:barOpts()});},30);
-  // numbers at the bottom of the report
-  const nrows=[];
-  MI.forEach((m,i)=>{
-    const a=catMnl[i], b=catMbn[i], t=a+b;
-    if((branch==='Manila'&&a===0)||(branch==='Malabon'&&b===0)||(branch==='All'&&t===0)) return;
-    if(branch==='All') nrows.push([MONTH_NAMES[i], money(a), money(b), money(t)]);
-    else nrows.push([MONTH_NAMES[i], money(branch==='Manila'?a:b)]);
-  });
-  const totMnl=catMnl.reduce((x,y)=>x+y,0), totMbn=catMbn.reduce((x,y)=>x+y,0);
-  if(branch==='All'){
-    nrows.push(['TOTAL', money(totMnl), money(totMbn), money(totMnl+totMbn)]);
-    tableFrom(mcard, [`${selCat} — Month`,'Manila','Malabon','Total'], nrows);
-  } else {
-    nrows.push(['TOTAL', money(branch==='Manila'?totMnl:totMbn)]);
-    tableFrom(mcard, [`${selCat} — Month`, branch], nrows);
-  }
-}
-
-// ---- Sub-tab 3: Sales by Item (service breakdown + qty + detailed total) ----
-function renderItemReport(host){
-  periodFilterBar(host, RKEYS, {branch:true});
-  if(!state.sales.length){ reportEmpty(host); return; }
-  const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
-  const yr=P.yr, branch=state.reportBranch, mArr=P.months, plabel=P.label;
-  const sales=salesInPeriod(branch, yr, mArr);
-  const by={}, qty={}; SERVICES_ORDER.forEach(s=>{by[s]=0;qty[s]=0;});
-  sales.forEach(s=>{ const c=SERVICES_ORDER.includes(s.category)?s.category:'OTHERS'; by[c]=(by[c]||0)+s.amount; qty[c]=(qty[c]||0)+(s.qty||0); });
-  const total=Object.values(by).reduce((a,b)=>a+b,0);
-  titleCard(host, `Sales by Item — ${plabel}${branch!=='All'?' · '+branch:''}`, total);
-  const pairs=SERVICES_ORDER.map(s=>[s,by[s]]).filter(p=>p[1]>0);
-
-  const wrap=document.createElement('div'); wrap.className='card';
-  wrap.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;';
-  const L=document.createElement('div'), R=document.createElement('div'); wrap.appendChild(L); wrap.appendChild(R); host.appendChild(wrap);
-  pieCanvas(L, pairs.map(p=>p[0]), pairs.map(p=>p[1]));
-  const st=document.createElement('table'); st.className='simple'; st.style.width='100%';
-  st.innerHTML='<thead><tr><th>Service</th><th style="text-align:right">Qty</th><th style="text-align:right">Sales</th><th style="text-align:right">Share</th></tr></thead>';
-  const stb=document.createElement('tbody');
-  pairs.forEach(([k,v])=>{ const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${escapeHtml(k)}</td><td style="text-align:right">${(qty[k]||0).toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(v)}</td><td style="text-align:right">${(v/(total||1)*100).toFixed(1)}%</td>`;
-    stb.appendChild(tr); });
-  const totQty=Object.values(qty).reduce((a,b)=>a+b,0);
-  const stot=document.createElement('tr'); stot.style.cssText='font-weight:700;border-top:2px solid var(--line)';
-  stot.innerHTML=`<td>Total</td><td style="text-align:right">${totQty.toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(total)}</td><td style="text-align:right">100%</td>`;
-  stb.appendChild(stot); st.appendChild(stb); R.appendChild(st);
-  if(window.innerWidth<720) wrap.style.gridTemplateColumns='1fr';
-
-  if(branch==='All'){
-    const card=sectionCard(host,'Service by branch — '+plabel);
-    const cv=document.createElement('canvas'); cv.style.maxHeight='300px'; card.appendChild(cv);
-    const mnl=SERVICES_ORDER.map(s=>salesInPeriod('Manila',yr,mArr).filter(x=>x.category===s).reduce((a,b)=>a+b.amount,0));
-    const mbn=SERVICES_ORDER.map(s=>salesInPeriod('Malabon',yr,mArr).filter(x=>x.category===s).reduce((a,b)=>a+b.amount,0));
-    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-      cv._c=new Chart(cv,{type:'bar',data:{labels:SERVICES_ORDER,datasets:[
-        {label:'Manila',data:mnl,backgroundColor:'#7f9dc4',borderRadius:4},
-        {label:'Malabon',data:mbn,backgroundColor:'#c96b6b',borderRadius:4}]},options:barOpts()});},30);
-  }
-
-  const detCard=sectionCard(host,'Sales per category (detailed)');
-  const byDet={}, qtyDet={};
-  sales.forEach(s=>{ const d=(s.description||s.item||s.category||'—'); byDet[d]=(byDet[d]||0)+s.amount; qtyDet[d]=(qtyDet[d]||0)+(s.qty||0); });
-  const detPairs=Object.entries(byDet).sort((a,b)=>b[1]-a[1]);
-  const dt=document.createElement('table'); dt.className='simple'; dt.style.width='100%';
-  dt.innerHTML='<thead><tr><th>Category</th><th style="text-align:right">Qty</th><th style="text-align:right">Sales</th><th style="text-align:right">Share</th></tr></thead>';
-  const dtb=document.createElement('tbody');
-  let detTotal=0, detQty=0;
-  detPairs.forEach(([k,v])=>{ detTotal+=v; detQty+=(qtyDet[k]||0);
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${escapeHtml(k)}</td><td style="text-align:right">${(qtyDet[k]||0).toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(v)}</td><td style="text-align:right">${(v/(total||1)*100).toFixed(1)}%</td>`;
-    dtb.appendChild(tr); });
-  const dtot=document.createElement('tr'); dtot.style.cssText='font-weight:700;border-top:2px solid var(--line)';
-  dtot.innerHTML=`<td>TOTAL</td><td style="text-align:right">${detQty.toLocaleString()}</td><td style="text-align:right;font-family:var(--font-m)">${money(detTotal)}</td><td style="text-align:right">100%</td>`;
-  dtb.appendChild(dtot); dt.appendChild(dtb); detCard.appendChild(dt);
-  const tie=document.createElement('div'); tie.className='notice';
-  tie.innerHTML = Math.round(detTotal)===Math.round(total)
-    ? `✓ Detailed total ${fmtMoney(detTotal)} matches the Sales-by-Item total above.`
-    : `⚠ Detailed total ${fmtMoney(detTotal)} vs by-item total ${fmtMoney(total)} — difference ${fmtMoney(Math.abs(detTotal-total))}.`;
-  detCard.appendChild(tie);
-}
-
-// ---- Sub-tab 4: Sales by Admin (from the Admin Sales Tracker xlsx) ----
-function renderAdminReport(host){
-  periodFilterBar(host, RKEYS, {branch:true});
-  const P=resolvePeriod(state.reportPeriod, state.reportMonth, state.reportQuarter);
-  const yr=P.yr; const perf=ADMIN_PERF_2026; const branch=state.reportBranch||'All';
-  const adminIn=(name)=> branch==='All' || (perf.admins[name] && perf.admins[name].branch===branch);
-  const effMonths=effectiveAdminMonths();
-  const mnames=effMonths.map(m=>MONTH_NAMES[m-1]);
-  const mArr=P.months.filter(m=>effMonths.includes(m));
-  const plabel=P.label;
-  if(yr!==perf.year || !mArr.length){
-    const note=document.createElement('div'); note.className='notice';
-    note.textContent='No admin performance data for this period. Jan\u2013Jul come from the tracker; Aug onward come from uploaded per-admin POS reports.';
-    host.appendChild(note); return;
-  }
-  const allNames=Object.keys(perf.admins);
-  const rows=allNames.filter(name=>adminIn(name)).map(name=>{
-    const sales=mArr.reduce((a,m)=>a+adminSalesForMonth(name,m),0);
-    const target=mArr.reduce((a,m)=>a+adminTargetFor(name,m),0);
-    return {name, sales, target};
-  }).filter(r=>r.sales>0 || r.target>0).sort((a,b)=>b.sales-a.sales);
-  const teamSales=rows.reduce((a,b)=>a+b.sales,0), teamTarget=rows.reduce((a,b)=>a+b.target,0);
-  if(!rows.length){ const n=document.createElement('div'); n.className='notice'; n.textContent='No admin data for this branch and period.'; host.appendChild(n); return; }
-  titleCard(host, `Sales by Admin \u2014 ${plabel}${branch!=='All'?' \u00b7 '+branch:''}`, teamSales,
-    teamTarget?`team at ${(teamSales/teamTarget*100).toFixed(1)}% of quota (${fmtMoney(teamTarget)})`:'');
-
-  twoCol(host,
-    (c)=>barhCanvas(c, rows.map(r=>r.name), rows.map(r=>r.sales)),
-    (c)=>pieCanvas(c, rows.map(r=>r.name), rows.map(r=>r.sales)));
-
-  // Per-admin vs quota. When a single month is selected, the Quota cell is editable.
-  const tcard=sectionCard(host,'Per-admin vs quota \u2014 '+plabel);
-  const editable = (P.kind==='month') && canEditSales();
-  const t=document.createElement('table'); t.className='simple'; t.style.width='100%';
-  t.innerHTML='<thead><tr><th>Admin</th><th style="text-align:right">Sales</th><th style="text-align:right">Quota</th><th style="text-align:right">Attainment</th><th style="text-align:right">Over/Under</th><th style="text-align:right">Share</th></tr></thead>';
-  const tb=document.createElement('tbody');
-  rows.forEach(r=>{
-    const diff=r.sales-r.target;
-    const col = (r.target? (r.sales>=r.target?'var(--lime)':'var(--red-ink)') : 'var(--lime)');
-    let quotaCell;
-    if(editable){
-      const m=mArr[0];
-      quotaCell='<input type="number" min="0" step="5000" value="'+(adminTargetFor(r.name,m)||'')+'" data-admin="'+escapeHtml(r.name)+'" data-month="'+m+'" class="quota-inp" style="width:104px;text-align:right;background:transparent;border:1px solid var(--line);border-radius:4px;color:#ffffff;padding:3px 6px;font-family:var(--font-m);">';
-    } else {
-      quotaCell = r.target?money(r.target):'\u2014';
-    }
-    const tr=document.createElement('tr');
-    tr.innerHTML='<td>'+escapeHtml(r.name)+'</td>'
-      +'<td style="text-align:right;font-family:var(--font-m);color:'+col+'">'+money(r.sales)+'</td>'
-      +'<td style="text-align:right">'+quotaCell+'</td>'
-      +'<td style="text-align:right;color:'+col+'">'+(r.target?(r.sales/r.target*100).toFixed(0)+'%':'\u2014')+'</td>'
-      +'<td style="text-align:right;color:'+col+'">'+(diff>=0?'+':'')+money(Math.abs(diff))+'</td>'
-      +'<td style="text-align:right">'+(teamSales?(r.sales/teamSales*100).toFixed(1)+'%':'\u2014')+'</td>';
-    tb.appendChild(tr);
-  });
-  t.appendChild(tb); tcard.appendChild(t);
-  if(editable){
-    const hint=document.createElement('div'); hint.className='hint'; hint.style.marginTop='6px';
-    hint.textContent='Quota is editable \u2014 type a value to set this admin\u2019s quota for '+plabel+' (saved in this browser). Use Quarterly/YTD to view totals.';
-    tcard.appendChild(hint);
-    tcard.querySelectorAll('.quota-inp').forEach(inp=>{
-      inp.onchange=()=>{ saveAdminQuotaOverride(inp.dataset.admin, Number(inp.dataset.month), inp.value===''?null:inp.value); render(); };
-    });
-  }
-
-  if(teamTarget){
-    const scard=sectionCard(host,'Team total vs quota');
-    const cv=document.createElement('canvas'); cv.style.maxHeight='150px'; scard.appendChild(cv);
-    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-      cv._c=new Chart(cv,{type:'bar',data:{labels:['Team'],datasets:[
-        {label:'Actual',data:[teamSales],backgroundColor:teamSales>=teamTarget?'#7fae82':'#c96b6b',borderRadius:4},
-        {label:'Quota',data:[teamTarget],backgroundColor:'rgba(255,255,255,.15)',borderRadius:4}]},
-      options:{...barOpts(), indexAxis:'y'}});},30);
-  }
-
-  // --- Monthly sales performance per admin (+ per-admin sales vs target) ---
-  const mcard=sectionCard(host,'Monthly sales per admin');
-  const adminNames=allNames.filter(n=>adminIn(n) && effMonths.some(m=>adminSalesForMonth(n,m)>0));
-  if(!state.adminLinePick || (state.adminLinePick!=='All' && !adminNames.includes(state.adminLinePick))) state.adminLinePick='All';
-  const pick=state.adminLinePick;
-  const sel=document.createElement('select'); sel.style.marginBottom='12px';
-  sel.innerHTML=['All',...adminNames].map(n=>`<option value="${escapeHtml(n)}" ${n===pick?'selected':''}>${n==='All'?'All admins':escapeHtml(n)+' \u2014 sales vs target'}</option>`).join('');
-  sel.onchange=()=>{ state.adminLinePick=sel.value; render(); };
-  mcard.appendChild(sel);
-  const cv=document.createElement('canvas'); cv.style.maxHeight='320px'; mcard.appendChild(cv);
-  if(pick==='All'){
-    const palette=chartPalette(adminNames.length);
-    const lineDs=adminNames.map((n,i)=>({label:n, data:effMonths.map(m=>adminSalesForMonth(n,m)),
-      borderColor:palette[i], backgroundColor:palette[i], borderWidth:2, tension:.25, pointRadius:2, fill:false}));
-    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-      cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:lineDs},options:barOpts()});},30);
-  } else {
-    const sData=effMonths.map(m=>adminSalesForMonth(pick,m));
-    const tData=effMonths.map(m=>adminTargetFor(pick,m));
-    setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-      cv._c=new Chart(cv,{type:'line',data:{labels:mnames,datasets:[
-        {label:pick+' sales', data:sData, borderColor:'#7fae82', backgroundColor:'#7fae82', borderWidth:2, tension:.25, pointRadius:3, fill:false},
-        {label:'Target', data:tData, borderColor:'#d1a56b', borderWidth:2, borderDash:[5,4], pointRadius:0, tension:.2, fill:false}
-      ]},options:barOpts()});},30);
-    const sTot=sData.reduce((a,b)=>a+b,0), tTot=tData.reduce((a,b)=>a+b,0);
-    const info=document.createElement('div'); info.className='notice';
-    info.innerHTML=`<strong>${escapeHtml(pick)}</strong> (${perf.admins[pick].branch}) \u2014 sales ${fmtMoney(sTot)} vs quota ${fmtMoney(tTot)}${tTot?` \u00b7 ${(sTot/tTot*100).toFixed(0)}% attainment`:' \u00b7 no quota set'}.`;
-    mcard.appendChild(info);
-  }
-  const mrows=adminNames.map(n=>{
-    const vals=effMonths.map(m=>adminSalesForMonth(n,m));
-    const tot=vals.reduce((a,b)=>a+b,0);
-    return [n, ...vals.map(v=>money(v)), money(tot)];
-  }).sort((a,b)=>parseFloat(b[b.length-1].replace(/,/g,''))-parseFloat(a[a.length-1].replace(/,/g,'')));
-  const colTot=effMonths.map(m=>adminNames.reduce((a,n)=>a+adminSalesForMonth(n,m),0));
-  mrows.push(['Team', ...colTot.map(v=>money(v)), money(colTot.reduce((a,b)=>a+b,0))]);
-  tableFrom(mcard, ['Admin', ...mnames, 'Total'], mrows);
-
-  // --- Editable quota grid (all admins x months) — editors only ---
-  if(canEditSales()){
-  const qcard=sectionCard(host,'Set monthly quota per admin');
-  const qhint=document.createElement('div'); qhint.className='hint'; qhint.style.marginBottom='10px';
-  qhint.textContent='Type a quota for any admin and month. Saved in this browser and applied to attainment above. Blank = tracker default.';
-  qcard.appendChild(qhint);
-  const qtbl=document.createElement('table'); qtbl.className='simple'; qtbl.style.width='100%';
-  qtbl.innerHTML='<thead><tr><th>Admin</th>'+effMonths.map(m=>`<th style="text-align:right">${MONTH_NAMES[m-1]}</th>`).join('')+'</tr></thead>';
-  const qtb=document.createElement('tbody');
-  allNames.filter(n=>adminIn(n)).forEach(name=>{
-    const tr=document.createElement('tr');
-    const nameTd=document.createElement('td'); nameTd.textContent=name; tr.appendChild(nameTd);
-    effMonths.forEach(m=>{
-      const td=document.createElement('td'); td.style.textAlign='right';
-      const inp=document.createElement('input'); inp.type='number'; inp.min='0'; inp.step='5000';
-      inp.value=adminTargetFor(name,m)||'';
-      inp.style.cssText='width:88px;text-align:right;background:transparent;border:1px solid var(--line);border-radius:4px;color:#ffffff;padding:3px 5px;';
-      inp.onchange=()=>{ saveAdminQuotaOverride(name, m, inp.value===''?null:inp.value); render(); };
-      td.appendChild(inp); tr.appendChild(td);
-    });
-    qtb.appendChild(tr);
-  });
-  qtbl.appendChild(qtb); qcard.appendChild(qtbl);
-  const rstBtn=document.createElement('button'); rstBtn.className='btn'; rstBtn.textContent='Reset to tracker defaults'; rstBtn.style.marginTop='10px';
-  rstBtn.onclick=()=>{ if(typeof confirm==='undefined' || confirm('Clear all manual quota edits saved in this browser?')){ try{ if(typeof localStorage!=='undefined') localStorage.removeItem(ADMIN_QUOTA_LS_KEY); }catch(e){} state.adminQuotaOverrides=null; render(); } };
-  qcard.appendChild(rstBtn);
-  } // end editors-only quota grid
-
-  const note=document.createElement('div'); note.className='notice';
-  note.textContent='Sales by Admin: Jan\u2013Jun from the tracker xlsx, July from the July POS files, and August onward from uploaded per-admin POS reports (matched by staff name). Branch reflects each admin\u2019s home branch.';
-  host.appendChild(note);
-}
-
-// =================== end Sales Dashboard sub-tab reports ===================
-
-// ---- Export all dashboards (data + charts) to a single .xlsx (instruction: backup) ----
-function loadScriptOnce(src){
-  return new Promise((res,rej)=>{
-    if([...document.scripts].some(s=>s.src===src)) return res();
-    const el=document.createElement('script'); el.src=src;
-    el.onload=()=>res(); el.onerror=()=>rej(new Error('Could not load '+src));
-    document.head.appendChild(el);
-  });
-}
-async function exportDashboardsToExcel(btn){
-  const orig = btn ? btn.textContent : '';
-  if(btn){ btn.disabled=true; btn.textContent='Preparing…'; }
-  try{
-    await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js');
-    const ExcelJS = window.ExcelJS;
-    if(!ExcelJS) throw new Error('ExcelJS unavailable');
-    const wb = new ExcelJS.Workbook();
-    wb.creator = 'Roshan Gym Ops'; wb.created = new Date();
-
-    // Snapshot filters, then render each dashboard at a full backup scope (All / YTD).
-    const snap = { rb:state.reportBranch, rp:state.reportPeriod, sb:state.salesBranch, sp:state.salesPeriod, alp:state.adminLinePick };
-    state.reportBranch='All'; state.reportPeriod='ytd';
-    state.salesBranch='All'; state.salesPeriod='ytd'; state.adminLinePick='All';
-
-    const reports = [
-      ['Overview', renderSalesOverview],
-      ['Performance per Branch', renderBranchPerf],
-      ['Sales by Category', renderCategoryReport],
-      ['Sales by Item', renderItemReport],
-      ['Sales by Admin', renderAdminReport],
-    ];
-    const holder=document.createElement('div');
-    holder.style.cssText='position:fixed;left:-99999px;top:0;width:920px;';
-    document.body.appendChild(holder);
-
-    for(const [name, fn] of reports){
-      const box=document.createElement('div'); box.style.width='900px'; holder.appendChild(box);
-      try{ fn(box); }catch(e){ /* keep going */ }
-      await new Promise(r=>setTimeout(r, 550)); // let Chart.js finish drawing
-      const ws=wb.addWorksheet(name.slice(0,31));
-      ws.columns=[{width:34},{width:16},{width:16},{width:16},{width:16},{width:16},{width:16},{width:16}];
-      let row=1;
-      const title=ws.getCell('A'+row); title.value=name; title.font={bold:true,size:14}; row+=2;
-      // section headers + tables
-      box.querySelectorAll('.card').forEach(card=>{
-        const h=card.querySelector('h2'); 
-        if(h){ const c=ws.getCell('A'+row); c.value=h.textContent.trim(); c.font={bold:true,size:11}; row++; }
-        card.querySelectorAll('table').forEach(tbl=>{
-          tbl.querySelectorAll('tr').forEach(tr=>{
-            const cells=[...tr.querySelectorAll('th,td')].map(td=>{
-              const t=td.textContent.trim();
-              const num=t.replace(/,/g,'').replace(/%$/,'');
-              return (t!=='' && /^-?\d+(\.\d+)?$/.test(num)) ? Number(num) : t;
-            });
-            const r=ws.addRow(cells);
-            if(tr.querySelector('th')) r.font={bold:true};
-            row++;
-          });
-          ws.addRow([]); row++;
-        });
-      });
-      // charts as images
-      const canvases=[...box.querySelectorAll('canvas')];
-      for(const cv of canvases){
-        let dataUrl=null; try{ dataUrl=cv.toDataURL('image/png'); }catch(e){}
-        if(!dataUrl || dataUrl.length<200) continue;
-        const imgId=wb.addImage({ base64:dataUrl, extension:'png' });
-        const w=Math.min(cv.width||700,700), h=Math.min(cv.height||300,320);
-        ws.addImage(imgId, { tl:{col:0.2, row:row}, ext:{width:w, height:h} });
-        row += Math.ceil(h/18)+2;
-      }
-      holder.removeChild(box);
-    }
-    document.body.removeChild(holder);
-    Object.assign(state, {reportBranch:snap.rb, reportPeriod:snap.rp, salesBranch:snap.sb, salesPeriod:snap.sp, adminLinePick:snap.alp});
-
-    const buf=await wb.xlsx.writeBuffer();
-    const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-    a.download=`Roshan_Sales_Dashboard_${new Date().toISOString().slice(0,10)}.xlsx`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
-    if(btn) btn.textContent='✓ Exported';
-  }catch(err){
-    console.error('Excel export failed:', err);
-    alert('Export failed: '+err.message+'\nIf this persists, the CDN for the Excel library may be blocked by your network.');
-    if(btn) btn.textContent=orig||'⬇ Export to Excel';
-  }finally{
-    if(btn){ btn.disabled=false; setTimeout(()=>{ if(btn.textContent==='✓ Exported') btn.textContent=orig||'⬇ Export to Excel'; }, 2500); render(); }
-  }
-}
-
 function monthLabel(ym){ const [y,m]=ym.split('-'); return `${MONTH_NAMES[Number(m)-1]} ${y}`; }
 function titleCard(host,title,total,subtitle){
   const c=document.createElement('div'); c.className='card';
@@ -3886,7 +3003,7 @@ function titleCard(host,title,total,subtitle){
 }
 function sectionCard(host,title){
   const c=document.createElement('div'); c.className='card';
-  if(title) c.innerHTML=`<h2 style="font-size:13px;color:#ffffff;margin-bottom:12px;">${escapeHtml(title)}</h2>`;
+  if(title) c.innerHTML=`<h2 style="font-size:13px;color:var(--ink-1);margin-bottom:12px;">${escapeHtml(title)}</h2>`;
   host.appendChild(c); return c;
 }
 function twoCol(host,leftFn,rightFn){
@@ -3902,9 +3019,9 @@ function pieCanvas(host,labels,data){
   const cv=document.createElement('canvas'); cv.style.maxHeight='280px'; host.appendChild(cv);
   const total=data.reduce((a,b)=>a+b,0)||1;
   setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
-    cv._c=new Chart(cv,{type:'doughnut',plugins:[pieLabelPlugin],data:{labels,datasets:[{data,backgroundColor:chartPalette(labels.length),borderColor:'#0d0d0f',borderWidth:2}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:'#ffffff',font:{size:11},padding:8,
-        generateLabels:(ch)=>ch.data.labels.map((lab,i)=>({text:`${lab} ${(data[i]/total*100).toFixed(1)}%`,fillStyle:ch.data.datasets[0].backgroundColor[i],fontColor:'#ffffff',index:i}))}},
+    cv._c=new Chart(cv,{type:'doughnut',data:{labels,datasets:[{data,backgroundColor:chartPalette(labels.length),borderColor:'#0d0d0f',borderWidth:2}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:'#c9d1d9',font:{size:11},padding:8,
+        generateLabels:(ch)=>ch.data.labels.map((lab,i)=>({text:`${lab} ${(data[i]/total*100).toFixed(1)}%`,fillStyle:ch.data.datasets[0].backgroundColor[i],index:i}))}},
         tooltip:{callbacks:{label:(c)=>` ${fmtMoney(c.parsed)} (${(c.parsed/total*100).toFixed(1)}%)`}}}}});},30);
 }
 function barhCanvas(host,labels,data){
@@ -3912,7 +3029,7 @@ function barhCanvas(host,labels,data){
   setTimeout(()=>{ if(typeof Chart==='undefined')return; if(cv._c)cv._c.destroy();
     cv._c=new Chart(cv,{type:'bar',data:{labels,datasets:[{data,backgroundColor:chartPalette(labels.length),borderRadius:4}]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:(c)=>' '+fmtMoney(c.parsed.x)}}},
-        scales:{x:{ticks:{color:'#c9d1d9',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}},y:{type:'category',ticks:{color:'#ffffff',font:{size:12}},grid:{display:false}}}}});},30);
+        scales:{x:{ticks:{color:'#8b949e',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}},y:{type:'category',ticks:{color:'#c9d1d9',font:{size:12}},grid:{display:false}}}}});},30);
 }
 function breakdownTable(host,pairs,total){
   const t=document.createElement('table'); t.className='simple'; t.style.width='100%';
@@ -3941,9 +3058,9 @@ function tableFrom(host,headers,rows,goodFlags){
 }
 function barOpts(){
   return {responsive:true,maintainAspectRatio:false,
-    plugins:{legend:{labels:{color:'#ffffff',font:{size:11}}},tooltip:{callbacks:{label:(c)=>` ${c.dataset.label}: ${fmtMoney(c.parsed.y)}`}}},
-    scales:{x:{ticks:{color:'#c9d1d9',font:{size:10}},grid:{color:'rgba(255,255,255,.05)'}},
-      y:{ticks:{color:'#c9d1d9',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}}}};
+    plugins:{legend:{labels:{color:'#c9d1d9',font:{size:11}}},tooltip:{callbacks:{label:(c)=>` ${c.dataset.label}: ${fmtMoney(c.parsed.y)}`}}},
+    scales:{x:{ticks:{color:'#8b949e',font:{size:10}},grid:{color:'rgba(255,255,255,.05)'}},
+      y:{ticks:{color:'#8b949e',font:{size:10},callback:v=>moneyK(v)},grid:{color:'rgba(255,255,255,.05)'}}}};
 }
 
 // ---------- MANAGE IMPORTS (batch cleanup) ----------
@@ -4026,7 +3143,7 @@ const PLAN_MONTHS = {'Monthly':1, 'Quarterly':3, 'Annual':12, 'Class pack':0};
 function memberStatus(m){
   const days = daysBetween(todayStr(), m.expiryDate);
   if(days < 0) return 'Expired';
-  if(days <= 14) return 'Expiring soon';
+  if(days <= 7) return 'Expiring soon';
   return 'Active';
 }
 
@@ -4040,15 +3157,13 @@ function renderMembership(el){
     return sum + hist.reduce((s,h)=>s+Number(h.amount||0),0);
   },0);
 
-  const missingForm = state.members.filter(m=>!m.formPath && !m.formUrl).length;
-  const needsReview = state.members.filter(m=>m.needsReview).length;
+  const missingForm = state.members.filter(m=>!m.formPath).length;
   const metrics = document.createElement('div'); metrics.className='metrics';
   metrics.innerHTML = `
     <div class="metric good"><div class="num">${active}</div><div class="lbl">Active members</div></div>
-    <div class="metric ${expiringSoon>0?'flag':''}"><div class="num">${expiringSoon}</div><div class="lbl">Expiring within 2 weeks</div></div>
+    <div class="metric ${expiringSoon>0?'flag':''}"><div class="num">${expiringSoon}</div><div class="lbl">Expiring within 7 days</div></div>
     <div class="metric"><div class="num">${expired}</div><div class="lbl">Expired</div></div>
-    <div class="metric ${needsReview>0?'flag':''}"><div class="num">${needsReview}</div><div class="lbl">Needs review</div></div>
-    <div class="metric"><div class="num">${missingForm}</div><div class="lbl">Missing membership form</div></div>
+    <div class="metric ${missingForm>0?'flag':''}"><div class="num">${missingForm}</div><div class="lbl">Missing membership form</div></div>
     <div class="metric"><div class="num">${fmtMoney(monthRevenue).replace('PHP ','')}</div><div class="lbl">Revenue this month (PHP)</div></div>
   `;
   el.appendChild(metrics);
@@ -4061,37 +3176,8 @@ function renderMembership(el){
     <option value="Active" ${state.memberFilter==='Active'?'selected':''}>Active</option>
     <option value="Expiring soon" ${state.memberFilter==='Expiring soon'?'selected':''}>Expiring soon</option>
     <option value="Expired" ${state.memberFilter==='Expired'?'selected':''}>Expired</option>
-    <option value="Needs review" ${state.memberFilter==='Needs review'?'selected':''}>Needs review</option>
-  </select>
-  <select id="member-branch">
-    <option value="All" ${state.memberBranch==='All'?'selected':''}>All branches</option>
-    <option value="Manila" ${state.memberBranch==='Manila'?'selected':''}>Manila</option>
-    <option value="Malabon" ${state.memberBranch==='Malabon'?'selected':''}>Malabon</option>
-  </select>
-  <input id="member-search" type="text" placeholder="Search name" value="${escapeHtml(state.memberSearch||'')}" style="min-width:180px;">`;
+  </select>`;
   head.appendChild(toolbar);
-  toolbar.querySelector('#member-branch').onchange=(e)=>{ state.memberBranch=e.target.value; renderContent(); };
-  toolbar.querySelector('#member-search').oninput=(e)=>{ state.memberSearch=e.target.value; renderContent(); };
-
-  const startRangeWrap = document.createElement('span'); startRangeWrap.style.cssText='display:inline-flex;align-items:center;gap:4px;';
-  const startLbl = document.createElement('span'); startLbl.className='hint'; startLbl.textContent='Membership date:';
-  startRangeWrap.appendChild(startLbl);
-  startRangeWrap.appendChild(dateRangeControl(()=>state.memberStartFrom, ()=>state.memberStartTo, (f,t)=>{ state.memberStartFrom=f; state.memberStartTo=t; render(); }));
-  toolbar.appendChild(startRangeWrap);
-
-  const expiryRangeWrap = document.createElement('span'); expiryRangeWrap.style.cssText='display:inline-flex;align-items:center;gap:4px;';
-  const expiryLbl = document.createElement('span'); expiryLbl.className='hint'; expiryLbl.textContent='Expiry date:';
-  expiryRangeWrap.appendChild(expiryLbl);
-  expiryRangeWrap.appendChild(dateRangeControl(()=>state.memberExpiryFrom, ()=>state.memberExpiryTo, (f,t)=>{ state.memberExpiryFrom=f; state.memberExpiryTo=t; render(); }));
-  toolbar.appendChild(expiryRangeWrap);
-
-  const viewToggle = document.createElement('div'); viewToggle.className='role-switch';
-  ['list','card'].forEach(v=>{
-    const b=document.createElement('button'); b.className='role-btn'+(state.memberView===v?' active':''); b.textContent=v==='list'?'List':'Cards';
-    b.onclick=()=>{ state.memberView=v; render(); };
-    viewToggle.appendChild(b);
-  });
-  toolbar.appendChild(viewToggle);
   const exportBtn=document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
   exportBtn.onclick=()=>{
     if(typeof XLSX==='undefined'){ alert('The Excel library did not load. Refresh the page.'); return; }
@@ -4100,22 +3186,17 @@ function renderMembership(el){
       'Member #': m.id,
       'Name': m.name,
       'Branch': m.branch||'',
-      'Contact no.': m.contact||'',
-      'Email': m.email||'',
-      'Membership type (New/Renewal)': m.status||'',
+      'Contact': m.contact||'',
+      'Status (New/Renew)': m.status||'',
       'Plan': m.plan,
       'Start date': m.startDate,
       'Expiry date': m.expiryDate,
       'Membership status': m.computed,
       'Amount (PHP)': m.amount,
       'T-shirt size': m.tshirtSize||'',
-      'T-shirt released': m.tshirtReleasedDate||'',
-      'Keyfob released': m.keyfobReleasedDate||'',
-      'Member no.': m.memberNo||'',
       'Source': m.source||'',
       'Remarks': m.remarks||'',
-      'Needs review': m.needsReview?'Yes':'',
-      'Form on file': (m.formPath||m.formUrl)?'Yes':'NO',
+      'Form on file': m.formPath?'Yes':'NO',
       'Form uploaded by': m.formUploadedBy||'',
       'Added by': m.createdBy||'',
     }));
@@ -4127,7 +3208,7 @@ function renderMembership(el){
   };
   toolbar.appendChild(exportBtn);
   if(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin'){
-    const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ Upload new member';
+    const b=document.createElement('button'); b.className='btn primary'; b.textContent='+ New member';
     b.onclick=()=>{ state.modal={type:'newMember'}; render(); };
     toolbar.appendChild(b);
   }
@@ -4135,54 +3216,40 @@ function renderMembership(el){
   toolbar.querySelector('#member-filter').onchange=(e)=>{ state.memberFilter=e.target.value; renderContent(); };
 
   let list = withStatus;
-  if(state.memberFilter==='Needs review') list = list.filter(m=>m.needsReview);
-  else if(state.memberFilter!=='All') list = list.filter(m=>m.computed===state.memberFilter);
-  if(state.memberBranch!=='All') list = list.filter(m=>m.branch===state.memberBranch);
-  list = list.filter(m=>inDateRange(m.startDate, state.memberStartFrom, state.memberStartTo));
-  list = list.filter(m=>inDateRange(m.expiryDate, state.memberExpiryFrom, state.memberExpiryTo));
-  const memberQ = (state.memberSearch||'').trim().toLowerCase();
-  if(memberQ) list = list.filter(m=>(m.name||'').toLowerCase().includes(memberQ));
+  if(state.memberFilter!=='All') list = list.filter(m=>m.computed===state.memberFilter);
   list.sort((a,b)=> a.expiryDate.localeCompare(b.expiryDate));
 
   if(list.length===0){
     const e=document.createElement('div'); e.className='empty'; e.textContent='No members match this filter.'; el.appendChild(e); return;
   }
 
-  // Renew / view-form / upload-form actions — shared by the card and list views.
-  function memberActionButtons(m){
-    const btns = [];
-    if(m.formPath || m.formUrl){
+  list.forEach(m=>{
+    const card = document.createElement('div'); card.className='card';
+    const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
+    const subBits = [m.contact||'—', m.branch||null, m.plan, 'expires '+fmtDate(m.expiryDate), m.tshirtSize?('shirt '+m.tshirtSize):null, m.source||null].filter(Boolean).map(escapeHtml);
+    card.innerHTML = `
+      <div class="req-top">
+        <div>
+          <div class="req-title">${escapeHtml(m.name)} ${m.formPath?'':'<span class="badge flag">no form on file</span>'}</div>
+          <div class="req-sub">${subBits.join(' &middot; ')}</div>
+        </div>
+        <span class="badge ${badgeClass}">${m.computed}</span>
+      </div>
+    `;
+    const row = document.createElement('div'); row.className='action-row';
+    if(m.formPath){
       const vf = document.createElement('button'); vf.className='btn sm'; vf.textContent='📄 View form';
       vf.onclick = ()=>window.open(`/api/members/${m.id}/form`, '_blank');
-      btns.push(vf);
+      row.appendChild(vf);
     }
     if(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin'){
       const b = document.createElement('button'); b.className='btn primary sm'; b.textContent='Renew';
       b.onclick=()=>{ state.modal={type:'renewMember', id:m.id}; render(); };
-      btns.push(b);
-
-      // Forms already live in Google Drive as part of the daily workflow, so
-      // saving a link there is the primary path; uploading a file directly
-      // stays available too, for anyone who doesn't have a Drive copy.
-      const linkBtn = document.createElement('button'); linkBtn.className='btn sm' + (m.formUrl?' ghost':''); linkBtn.textContent = m.formUrl ? '🔗 Replace Drive link' : '🔗 Save Drive link';
-      linkBtn.onclick = async ()=>{
-        const url = prompt('Paste the Google Drive link to this member’s membership form:', m.formUrl||'');
-        if(!url) return;
-        linkBtn.disabled=true;
-        try{
-          const res = await fetch(`/api/members/${m.id}/form`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url}) });
-          const data = await res.json().catch(()=>({}));
-          if(!res.ok) throw new Error(data.error || 'Something went wrong.');
-          const i = state.members.findIndex(x=>x.id===m.id);
-          if(i>=0) state.members[i] = mapMember(data.member);
-          render();
-        }catch(e){ alert(e.message); linkBtn.disabled=false; }
-      };
-      btns.push(linkBtn);
-
+      row.appendChild(b);
+      // Upload (or replace) the scanned form
       const fileInput = document.createElement('input');
       fileInput.type='file'; fileInput.accept='image/png,image/jpeg,application/pdf'; fileInput.style.display='none';
-      const upBtn = document.createElement('button'); upBtn.className='btn sm ghost'; upBtn.textContent = m.formPath ? 'Replace uploaded file' : '⬆ Upload file instead';
+      const upBtn = document.createElement('button'); upBtn.className='btn sm' + (m.formPath?' ghost':''); upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
       fileInput.onchange = async ()=>{
         const picked = fileInput.files[0];
         if(!picked) return;
@@ -4190,7 +3257,7 @@ function renderMembership(el){
         const file = await compressImageFile(picked);
         if(file.size > UPLOAD_LIMIT_BYTES){
           alert('That file is ' + (file.size/1024/1024).toFixed(1) + 'MB, over the 4MB upload limit. Re-scan it as a JPG/PNG photo or at a lower resolution.');
-          upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace uploaded file' : '⬆ Upload file instead';
+          upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form';
           return;
         }
         try{
@@ -4198,122 +3265,11 @@ function renderMembership(el){
           const i = state.members.findIndex(x=>x.id===m.id);
           if(i>=0) state.members[i] = mapMember(member);
           render();
-        }catch(e){ alert(e.message); upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace uploaded file' : '⬆ Upload file instead'; }
+        }catch(e){ alert(e.message); upBtn.disabled=false; upBtn.textContent = m.formPath ? 'Replace form' : '⬆ Upload form'; }
       };
       upBtn.onclick = ()=>fileInput.click();
-      btns.push(upBtn, fileInput);
+      row.appendChild(upBtn); row.appendChild(fileInput);
     }
-    return btns;
-  }
-
-  // Saves one operational detail (t-shirt size, source, or a released date)
-  // that the POS upload doesn't carry — set per member, from the list, once
-  // known. Shared by the date and dropdown inputs below.
-  async function saveMemberDetail(m, field, value){
-    const res = await fetch(`/api/members/${m.id}/details`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ [field]: value }),
-    });
-    const data = await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(data.error || 'Something went wrong.');
-    const i = state.members.findIndex(x=>x.id===m.id);
-    if(i>=0) state.members[i] = mapMember(data.member);
-  }
-
-  // Read-only text for non-admins; otherwise an inline control that saves
-  // immediately on change.
-  function releaseDateInput(m, prop, field){
-    if(!(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin')){
-      const span = document.createElement('span'); span.textContent = fmtDate(m[prop]) || '—';
-      return span;
-    }
-    const input = document.createElement('input');
-    input.type='date'; input.value = m[prop] || ''; input.style.width='135px';
-    input.onchange = async ()=>{
-      input.disabled = true;
-      try{ await saveMemberDetail(m, field, input.value || null); }
-      catch(e){ alert(e.message); }
-      input.disabled = false;
-    };
-    return input;
-  }
-
-  function detailSelectInput(m, prop, field, options){
-    if(!(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin')){
-      const span = document.createElement('span'); span.textContent = m[prop] || '—';
-      return span;
-    }
-    const sel = document.createElement('select');
-    sel.innerHTML = '<option value="">—</option>' + options.map(o=>`<option ${m[prop]===o?'selected':''}>${o}</option>`).join('');
-    sel.onchange = async ()=>{
-      sel.disabled = true;
-      try{ await saveMemberDetail(m, field, sel.value); }
-      catch(e){ alert(e.message); }
-      sel.disabled = false;
-    };
-    return sel;
-  }
-
-  if(state.memberView==='list'){
-    const wrap = document.createElement('div'); wrap.style.overflowX='auto';
-    const table = document.createElement('table'); table.className='simple';
-    table.innerHTML = `<thead><tr>
-      <th>Name</th><th>Branch</th><th>Member no.</th><th>Contact no.</th><th>Email</th><th>Membership type</th>
-      <th>Membership date</th><th>Expiry date</th><th>Amount</th><th>T-shirt size</th><th>T-shirt released</th>
-      <th>Keyfob released</th><th>Source</th><th>Standing</th><th>Remarks</th><th></th>
-    </tr></thead><tbody></tbody>`;
-    const tbody = table.querySelector('tbody');
-    list.forEach(m=>{
-      const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${escapeHtml(m.name)} ${(m.formPath||m.formUrl)?'':'<span class="badge neutral">no form</span>'} ${m.needsReview?'<span class="badge flag">review</span>':''}</td>
-        <td>${escapeHtml(m.branch||'')}</td>
-        <td>${escapeHtml(m.memberNo||'')}</td>
-        <td>${escapeHtml(m.contact||'')}</td>
-        <td>${escapeHtml(m.email||'')}</td>
-        <td>${escapeHtml(m.status||'')}</td>
-        <td>${fmtDate(m.startDate)}</td>
-        <td>${fmtDate(m.expiryDate)}</td>
-        <td>${fmtMoney(m.amount).replace('PHP ','')}</td>
-        <td></td>
-        <td></td>
-        <td>${m.branch==='Malabon' ? '' : 'N/A'}</td>
-        <td></td>
-        <td><span class="badge ${badgeClass}">${m.computed}</span></td>
-        <td>${escapeHtml(m.remarks||'')}</td>
-        <td></td>
-      `;
-      const cells = tr.children;
-      cells[9].appendChild(detailSelectInput(m, 'tshirtSize', 'tshirtSize', MEMBER_TSHIRT_OPTIONS));
-      cells[10].appendChild(releaseDateInput(m, 'tshirtReleasedDate', 'tshirtReleasedDate'));
-      if(m.branch==='Malabon') cells[11].appendChild(releaseDateInput(m, 'keyfobReleasedDate', 'keyfobReleasedDate'));
-      cells[12].appendChild(detailSelectInput(m, 'source', 'source', MEMBER_SOURCE_OPTIONS));
-      const actionsTd = tr.lastElementChild;
-      actionsTd.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
-      memberActionButtons(m).forEach(b=>actionsTd.appendChild(b));
-      tbody.appendChild(tr);
-    });
-    wrap.appendChild(table);
-    el.appendChild(wrap);
-    return;
-  }
-
-  list.forEach(m=>{
-    const card = document.createElement('div'); card.className='card';
-    const badgeClass = m.computed==='Active' ? 'ok' : m.computed==='Expiring soon' ? 'warn' : 'flag';
-    const subBits = [m.contact||'—', m.branch||null, m.memberNo?('#'+m.memberNo):null, m.plan, 'expires '+fmtDate(m.expiryDate), m.tshirtSize?('shirt '+m.tshirtSize):null, m.source||null].filter(Boolean).map(escapeHtml);
-    card.innerHTML = `
-      <div class="req-top">
-        <div>
-          <div class="req-title">${escapeHtml(m.name)} ${(m.formPath||m.formUrl)?'':'<span class="badge neutral">no form on file</span>'} ${m.needsReview?'<span class="badge flag">needs review</span>':''}</div>
-          <div class="req-sub">${subBits.join(' &middot; ')}</div>
-        </div>
-        <span class="badge ${badgeClass}">${m.computed}</span>
-      </div>
-    `;
-    const row = document.createElement('div'); row.className='action-row';
-    memberActionButtons(m).forEach(b=>row.appendChild(b));
     if(row.children.length) card.appendChild(row);
     el.appendChild(card);
   });
@@ -4344,286 +3300,241 @@ async function compressImageFile(file, maxDim = 2000, quality = 0.82){
   }
 }
 
-const MEMBER_SOURCE_OPTIONS = ['Referral','Online Inquiries','Walk-Ins','Admin Page/Group','Old Client'];
-const MEMBER_TSHIRT_OPTIONS = ['Small','Medium','Large','XL','XXL'];
-const MEMBER_STATUS_OPTIONS = ['New','Renewal'];
-
-// Matches a raw report value to one of a fixed dropdown's options (case/
-// whitespace-insensitive, substring-tolerant); '' if nothing close enough
-// so the admin picks it manually in the grid instead of silently guessing.
-function matchOption(raw, options){
-  const v = String(raw==null?'':raw).trim().toLowerCase();
-  if(!v) return '';
-  const exact = options.find(o=>o.toLowerCase()===v);
-  if(exact) return exact;
-  const partial = options.find(o=>o.toLowerCase().includes(v) || v.includes(o.toLowerCase()));
-  return partial || '';
-}
-
-// Required fields for a row before it can be uploaded — mirrors
-// lib/members.js validateMemberRow() server-side (kept in sync manually;
-// app.js is a plain script, not an ES module, so it can't import that file).
-// T-shirt/keyfob released dates are deliberately not checked here — they're
-// set later, per member, once the item is actually handed over (see
-// memberActionButtons' release-date inputs), not at upload time.
-function memberRowMissingFields(r){
-  const missing = [];
-  if(!r.name) missing.push('name');
-  if(!r.branch) missing.push('branch');
-  if(!r.startDate) missing.push('membership date');
-  if(!(Number(r.amount) > 0)) missing.push('amount paid');
-  return missing;
-}
-
-// "Upload New Member" — the only way to add members now. Pick the day's POS
-// report, map its columns, fill in the details a POS export won't carry
-// (t-shirt/keyfob/source), check for duplicates, then save. No scanned form
-// here anymore — the report is the record (scans, if kept, live elsewhere).
 function renderNewMemberModal(modal){
-  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Upload new member</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">New member</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
   const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="notice">Step 1: attach the scanned membership form (PNG, JPG, or PDF) — <strong>required</strong>. The system will read it and fill in what it can; review and correct the details, then save.</div>
+    <div class="field full"><label>Membership form (scan or photo) — required</label><input id="m-form-file" type="file" accept="image/png,image/jpeg,application/pdf"></div>
+    <div id="m-form-preview" style="display:none;margin:0 0 12px;"></div>
+    <div class="action-row" style="margin:2px 0 14px;">
+      <button class="btn sm" id="m-scan-btn" type="button">🔍 Re-scan form</button>
+      <span class="hint" id="m-scan-status"></span>
+    </div>
+    <div class="form-grid">
+      <div class="field full"><label>Name</label><input id="m-name" placeholder="Full name"></div>
+      <div class="field"><label>Contact</label><input id="m-contact" placeholder="Phone or email"></div>
+      <div class="field"><label>Branch</label><select id="m-branch"><option>Manila</option><option>Malabon</option></select></div>
+      <div class="field"><label>Status</label><select id="m-status"><option>New</option><option>Renew</option></select></div>
+      <div class="field"><label>Plan</label><select id="m-plan">${Object.keys(PLAN_MONTHS).map(p=>`<option value="${p}" ${p==='Annual'?'selected':''}>${p}</option>`).join('')}</select></div>
+      <div class="field"><label>Start date</label><input id="m-start" type="date" value="${todayStr()}"></div>
+      <div class="field"><label>Amount paid (PHP)</label><input id="m-amount" type="number" min="0" step="0.01" value="600" placeholder="0.00"></div>
+      <div class="field"><label>T-shirt size</label><select id="m-tshirt"><option value="">—</option><option>Small</option><option>Medium</option><option>Large</option><option>XL</option><option>XXL</option></select></div>
+      <div class="field"><label>Source</label><select id="m-source"><option value="">—</option><option>Walk-in</option><option>Online Inquiries</option><option>Referral</option><option>Old Client</option><option>Facebook</option><option>Other</option></select></div>
+      <div class="field full"><label>Remarks (optional)</label><input id="m-remarks" placeholder="e.g. with pic, done text"></div>
+    </div>
+    <div id="m-error"></div>
+  `;
   modal.appendChild(wrap);
 
-  let rawRows = [];
-  let headers = [];
-  let rows = [];
-
-  function fmtCellDate(v){
-    if(v instanceof Date && !isNaN(v)) return v.getFullYear()+'-'+String(v.getMonth()+1).padStart(2,'0')+'-'+String(v.getDate()).padStart(2,'0');
-    const s = String(v==null?'':v).trim();
-    if(!s) return '';
-    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if(m) return m[0];
-    const d = new Date(s);
-    if(!isNaN(d)) return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-    return '';
-  }
-  function normBranch(v){
-    const s = String(v==null?'':v).toLowerCase();
-    if(s.includes('malabon')) return 'Malabon';
-    if(s.includes('manila')) return 'Manila';
-    return String(v==null?'':v).trim();
-  }
-
-  function showStep1(){
-    wrap.innerHTML = `
-      <div class="notice">Upload the day's POS report (Excel or CSV) with the new membership entries for the day. You'll match its columns, fill in the required details per member, then save.</div>
-      <div class="field full"><label>POS report file</label><input id="mb-file" type="file" accept=".xlsx,.xls,.csv"></div>
-      <div id="mb-file-error"></div>
-    `;
-    wrap.querySelector('#mb-file').onchange = handleFile;
-  }
-
-  async function handleFile(e){
-    const file = e.target.files[0];
-    if(!file) return;
-    const errEl = wrap.querySelector('#mb-file-error'); errEl.innerHTML='';
-    if(typeof XLSX==='undefined'){ errEl.innerHTML = '<div class="notice err">The spreadsheet library did not load. Refresh the page and try again.</div>'; return; }
-    try{
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, {type:'array', cellDates:true});
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      rawRows = XLSX.utils.sheet_to_json(sheet, {defval:''});
-      if(!rawRows.length){ errEl.innerHTML = '<div class="notice err">No rows found in the first sheet of that file.</div>'; return; }
-      headers = Object.keys(rawRows[0]);
-      showStep2();
-    }catch(err){ errEl.innerHTML = `<div class="notice err">${escapeHtml(err.message || 'Could not read that file.')}</div>`; }
-  }
-
-  const GUESS = {
-    name: /name/i, branch: /branch/i, date: /date/i, amount: /amount|paid|price/i,
-    status: /status|new.*renew|membership.?type/i, memberNo: /member.*(no|id|#)|member.?number/i,
-    phone: /mobile|contact|phone|cell/i, email: /e-?mail/i,
+  // --- OCR auto-fill: runs automatically when a file is chosen ---
+  // (Printed text reads well; handwriting is best-effort — always review.)
+  const scanBtn = wrap.querySelector('#m-scan-btn');
+  const scanStatus = wrap.querySelector('#m-scan-status');
+  // Holds the (possibly compressed) file that will actually be saved.
+  let memberFormFile = null;
+  const setVal = (id, v)=>{
+    if(v!=null && String(v).trim()!==''){
+      const el=document.getElementById(id);
+      if(el){
+        el.value = v;
+        // Mark as machine-filled so the admin knows to verify it against the
+        // scan. The highlight clears the moment they edit the field.
+        el.classList.add('ai-filled');
+        el.addEventListener('input', ()=>el.classList.remove('ai-filled'), {once:true});
+        el.addEventListener('change', ()=>el.classList.remove('ai-filled'), {once:true});
+        return 1;
+      }
+    }
+    return 0;
   };
-  const guessCol = (re)=> headers.find(h=>re.test(h)) || '';
 
-  function showStep2(){
-    const opts = (sel)=> '<option value="">— none —</option>' + headers.map(h=>`<option value="${escapeHtml(h)}" ${h===sel?'selected':''}>${escapeHtml(h)}</option>`).join('');
-    wrap.innerHTML = `
-      <div class="notice">Found ${rawRows.length} row(s). Match the report's columns to these fields — T-shirt size, Source, and the released dates aren't part of this report, so you'll set those per member from the list afterward. Fields with * are required.</div>
-      <div class="form-grid">
-        <div class="field"><label>Name *</label><select id="map-name">${opts(guessCol(GUESS.name))}</select></div>
-        <div class="field"><label>Branch *</label><select id="map-branch">${opts(guessCol(GUESS.branch))}</select></div>
-        <div class="field"><label>Membership date *</label><select id="map-date">${opts(guessCol(GUESS.date))}</select></div>
-        <div class="field"><label>Amount paid</label><select id="map-amount">${opts(guessCol(GUESS.amount))}</select></div>
-        <div class="field"><label>Membership type (New/Renewal)</label><select id="map-status">${opts(guessCol(GUESS.status))}</select></div>
-        <div class="field"><label>Member no.</label><select id="map-memberNo">${opts(guessCol(GUESS.memberNo))}</select></div>
-        <div class="field"><label>Contact number</label><select id="map-phone">${opts(guessCol(GUESS.phone))}</select></div>
-        <div class="field"><label>Email address</label><select id="map-email">${opts(guessCol(GUESS.email))}</select></div>
-      </div>
-      <div id="mb-map-error"></div>
-      <div class="action-row">
-        <button class="btn ghost" id="mb-back1" type="button">&larr; Choose a different file</button>
-        <button class="btn primary" id="mb-map-next" type="button">Continue</button>
-      </div>
-    `;
-    wrap.querySelector('#mb-back1').onclick = showStep1;
-    wrap.querySelector('#mb-map-next').onclick = buildRows;
-  }
-
-  function buildRows(){
-    const get = (id)=>wrap.querySelector('#'+id).value;
-    const cName=get('map-name'), cBranch=get('map-branch'), cDate=get('map-date'), cAmount=get('map-amount'),
-          cStatus=get('map-status'), cMemberNo=get('map-memberNo'), cPhone=get('map-phone'), cEmail=get('map-email');
-    const errEl = wrap.querySelector('#mb-map-error'); errEl.innerHTML='';
-    if(!cName || !cBranch || !cDate){ errEl.innerHTML = '<div class="notice err">Name, Branch, and Membership date must be matched to a column to continue.</div>'; return; }
-    rows = rawRows.map((r,i)=>({
-      _key:i,
-      name: String(r[cName]==null?'':r[cName]).trim(),
-      branch: normBranch(r[cBranch]),
-      startDate: fmtCellDate(r[cDate]),
-      amount: cAmount ? (parseFloat(r[cAmount])||0) : 600,
-      status: (cStatus && /renew/i.test(String(r[cStatus]))) ? 'Renewal' : 'New',
-      memberNo: cMemberNo ? String(r[cMemberNo]==null?'':r[cMemberNo]).trim() : '',
-      contact: cPhone ? String(r[cPhone]==null?'':r[cPhone]).trim() : '',
-      email: cEmail ? String(r[cEmail]==null?'':r[cEmail]).trim() : '',
-      skip:false, dup:null, removed:false,
-    })).filter(r=>r.name);
-    if(!rows.length){ errEl.innerHTML = '<div class="notice err">No rows had a name in the matched column — check your column choices.</div>'; return; }
-    showStep3();
-  }
-
-  function rowHtml(r, idx){
-    const dupBadge = r.dup ? `<div class="hint" style="color:var(--red-ink);">Existing: ${escapeHtml(r.dup.id)}, expires ${escapeHtml(fmtDate(r.dup.expiryDate)||'')}</div>
-      <label class="hint" style="display:block;"><input type="checkbox" class="f-skip" ${r.skip?'checked':''}> Skip this row</label>` : '';
-    return `
-      <tr data-idx="${idx}">
-        <td>${idx+1}</td>
-        <td><input class="f-name" value="${escapeHtml(r.name)}" style="width:150px;"></td>
-        <td><select class="f-branch"><option ${r.branch==='Manila'?'selected':''}>Manila</option><option ${r.branch==='Malabon'?'selected':''}>Malabon</option></select></td>
-        <td><input class="f-date" type="date" value="${r.startDate||''}" style="width:135px;"></td>
-        <td><input class="f-amount" type="number" min="0" step="0.01" value="${r.amount}" style="width:85px;"></td>
-        <td><select class="f-status">${MEMBER_STATUS_OPTIONS.map(s=>`<option ${r.status===s?'selected':''}>${s}</option>`).join('')}</select></td>
-        <td><input class="f-memberno" value="${escapeHtml(r.memberNo)}" style="width:90px;"></td>
-        <td><input class="f-contact" value="${escapeHtml(r.contact)}" style="width:120px;" placeholder="Contact no."></td>
-        <td><input class="f-email" value="${escapeHtml(r.email)}" style="width:150px;" placeholder="Email"></td>
-        <td>${dupBadge}</td>
-        <td><button class="btn sm ghost f-remove" type="button">&times;</button></td>
-      </tr>
-    `;
-  }
-
-  function wireRow(tr, idx){
-    const r = rows[idx];
-    const on = (sel, prop, parse)=>{
-      const el = tr.querySelector(sel);
-      if(!el) return;
-      el.addEventListener('change', ()=>{ r[prop] = parse ? parse(el.value) : el.value; });
-      el.addEventListener('input', ()=>{ r[prop] = parse ? parse(el.value) : el.value; });
-    };
-    on('.f-name','name'); on('.f-date','startDate'); on('.f-amount','amount',v=>parseFloat(v)||0);
-    on('.f-status','status');
-    on('.f-memberno','memberNo'); on('.f-contact','contact'); on('.f-email','email');
-    const branchSel = tr.querySelector('.f-branch');
-    branchSel.addEventListener('change', ()=>{ r.branch = branchSel.value; });
-    const skipEl = tr.querySelector('.f-skip');
-    if(skipEl) skipEl.addEventListener('change', ()=>{ r.skip = skipEl.checked; });
-    tr.querySelector('.f-remove').onclick = ()=>{ r.removed = true; renderGrid(); };
-  }
-
-  function renderGrid(){
-    const active = rows.filter(r=>!r.removed);
-    const dupCount = active.filter(r=>r.dup).length;
-    const table = wrap.querySelector('#mb-grid-wrap');
-    table.innerHTML = `
-      <div style="overflow-x:auto;">
-        <table class="simple">
-          <thead><tr>
-            <th>#</th><th>Name</th><th>Branch</th><th>Date</th><th>Amount</th><th>Membership type</th>
-            <th>Member no.</th><th>Contact no.</th><th>Email</th><th>Duplicate</th><th></th>
-          </tr></thead>
-          <tbody>${active.map((r)=>rowHtml(r, rows.indexOf(r))).join('')}</tbody>
-        </table>
-      </div>
-      <div class="hint" style="margin-top:8px;">${active.length} row(s)${dupCount?`, ${dupCount} flagged as possible duplicates`:''}.</div>
-    `;
-    table.querySelectorAll('tbody tr').forEach(tr=>wireRow(tr, Number(tr.dataset.idx)));
-  }
-
-  async function checkDuplicates(){
-    const active = rows.filter(r=>!r.removed);
-    const statusEl = wrap.querySelector('#mb-dup-status');
-    statusEl.textContent = 'Checking for duplicates…';
-    try{
-      const res = await fetch('/api/members/check-duplicates', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ rows: active.map(r=>({name:r.name, branch:r.branch, memberNo:r.memberNo})) }),
-      });
-      const data = await res.json().catch(()=>({}));
-      if(!res.ok) throw new Error(data.error || 'Duplicate check failed.');
-      active.forEach(r=>{ r.dup = null; });
-      (data.matches||[]).forEach(m=>{
-        const r = active[m.index];
-        if(r){ r.dup = m.existing; r.skip = true; }
-      });
-      statusEl.textContent = data.matches && data.matches.length
-        ? `Found ${data.matches.length} possible duplicate(s) — review below (they're set to Skip by default).`
-        : 'No duplicates found.';
-      renderGrid();
-    }catch(e){ statusEl.textContent = e.message; }
-  }
-
-  async function saveRows(){
-    const errEl = wrap.querySelector('#mb-save-error'); errEl.innerHTML='';
-    const active = rows.filter(r=>!r.removed && !r.skip);
-    if(!active.length){ errEl.innerHTML = '<div class="notice err">No rows to upload — every row is either removed or skipped.</div>'; return; }
-    const problems = [];
-    active.forEach((r)=>{
-      const missing = memberRowMissingFields(r);
-      if(missing.length) problems.push(`Row for "${r.name||'(no name)'}" is missing: ${missing.join(', ')}.`);
-    });
-    if(problems.length){
-      errEl.innerHTML = `<div class="notice err">Fill in the required fields before uploading:<br>${problems.map(escapeHtml).join('<br>')}</div>`;
+  const showPreview = (file)=>{
+    const pv = wrap.querySelector('#m-form-preview');
+    pv.innerHTML = ''; pv.style.display = '';
+    if(file.type === 'application/pdf'){
+      pv.innerHTML = '<div class="hint">PDF attached: ' + escapeHtml(file.name) + ' — open it beside this window to compare while reviewing.</div>';
       return;
     }
-    const saveBtn = wrap.querySelector('#mb-save-btn');
-    saveBtn.disabled = true; saveBtn.textContent = 'Uploading…';
-    try{
-      const res = await fetch('/api/members/bulk-import', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ rows: active.map(r=>({
-          name:r.name, branch:r.branch, startDate:r.startDate, amount:r.amount, status:r.status,
-          memberNo:r.memberNo, contact:r.contact, email:r.email, plan:'Annual',
-        })) }),
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(file);
+    img.style.cssText = 'max-width:100%;max-height:340px;border:1px solid var(--line);border-radius:8px;display:block;';
+    img.title = 'Compare the handwriting here against the highlighted fields below';
+    const cap = document.createElement('div'); cap.className='hint'; cap.style.marginTop='6px';
+    cap.textContent = 'Compare the form against the highlighted fields below — highlights clear as you confirm/edit each one.';
+    pv.appendChild(img); pv.appendChild(cap);
+  };
+
+  const aiScan = async (file)=>{
+    // Try the server-side AI reader first (reads handwriting well).
+    if(file.size > UPLOAD_LIMIT_BYTES){
+      throw new Error('This file is ' + (file.size/1024/1024).toFixed(1) + 'MB — too large to read (limit 4MB).');
+    }
+    scanStatus.textContent = 'Reading the form with AI\u2026 usually 5\u201315 seconds.';
+    const fd = new FormData(); fd.append('file', file);
+    const res = await fetch('/api/members/scan', {method:'POST', body:fd});
+    if(res.status === 413){
+      throw new Error('The file is too large for the reader (limit about 4MB).');
+    }
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error || 'AI reading failed.');
+    if(!data.available) return null; // no API key configured \u2014 caller falls back
+    const f = data.fields || {};
+    let filled = 0;
+    const nameV = [f.firstName, f.lastName].filter(Boolean).join(' ');
+    filled += setVal('m-name', nameV || null);
+    const contactV = [f.contactNumber, f.email].filter(Boolean).join(' / ');
+    filled += setVal('m-contact', contactV || null);
+    filled += setVal('m-start', f.startDate || null);
+    if(f.branch === 'Manila' || f.branch === 'Malabon'){ document.getElementById('m-branch').value = f.branch; document.getElementById('m-branch').classList.add('ai-filled'); filled++; }
+    if(f.source){ const sel = document.getElementById('m-source'); if([...sel.options].some(o=>o.value===f.source)){ sel.value = f.source; sel.classList.add('ai-filled'); filled++; } }
+    if(f.tshirtSize){ const ts = document.getElementById('m-tshirt'); if([...ts.options].some(o=>o.value===f.tshirtSize)){ ts.value = f.tshirtSize; ts.classList.add('ai-filled'); filled++; } }
+    // Address and gender aren't dedicated fields — keep them in remarks so the
+    // detail from the form isn't lost.
+    const extras = [];
+    if(f.address) extras.push('Address: ' + f.address);
+    if(f.gender) extras.push('Gender: ' + f.gender);
+    if(f.staffRep) extras.push('Processed by: ' + f.staffRep);
+    if(extras.length){ const rEl = document.getElementById('m-remarks'); if(rEl && !rEl.value) { rEl.value = extras.join(' · '); rEl.classList.add('ai-filled'); } }
+    return filled;
+  };
+
+  const basicScan = async (file)=>{
+    // Fallback: on-device OCR (printed labels read fine; handwriting is best-effort).
+    if(file.type === 'application/pdf'){ scanStatus.textContent = 'The basic reader works on images only \u2014 the PDF will still be saved as the form copy. Fill the fields manually, or configure the AI reader for PDFs.'; return null; }
+    if(typeof Tesseract === 'undefined'){
+      await new Promise((res, rej)=>{
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js';
+        s.onload = res; s.onerror = ()=>rej(new Error('Could not load the text reader. Check your internet connection.'));
+        document.head.appendChild(s);
       });
+    }
+    scanStatus.textContent = 'Reading the form\u2026 this can take ~20 seconds.';
+    const result = await Tesseract.recognize(file, 'eng');
+    const text = (result && result.data && result.data.text) || '';
+    const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+    let filled = 0;
+    const grab = (labels)=>{
+      for(const line of lines){
+        for(const lab of labels){
+          const rx = new RegExp('^\\s*' + lab + '\\s*[:\\-]?\\s*(.+)$', 'i');
+          const m = line.match(rx);
+          if(m && m[1] && m[1].trim().length > 1) return m[1].trim();
+        }
+      }
+      return null;
+    };
+    const lastName = grab(['last name']);
+    const firstName = grab(['first name']);
+    let nameV = (firstName || lastName) ? [firstName, lastName].filter(Boolean).join(' ') : grab(['full name','member name','name']);
+    filled += setVal('m-name', nameV);
+    const phoneV = grab(['contact number','contact no','contact','mobile','phone','cellphone','cp no']) ||
+      (text.match(/09\d{9}|\+639\d{9}/) || [null])[0];
+    const emailV = grab(['email address','email']) ||
+      (text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/) || [null])[0];
+    filled += setVal('m-contact', [phoneV, emailV].filter(Boolean).join(' / ') || null);
+    return filled;
+  };
+
+  const runScan = async ()=>{
+    const fileInput = wrap.querySelector('#m-form-file');
+    const original = fileInput.files[0];
+    if(!original){ scanStatus.textContent = 'Choose the form file first.'; return; }
+    scanBtn.disabled = true;
+    showPreview(original);
+
+    // Shrink large photos so both the reader and the save request stay under
+    // the upload limit. The compressed copy is what gets stored.
+    let file = original;
+    if(original.type.startsWith('image/') && original.size > UPLOAD_LIMIT_BYTES/2){
+      scanStatus.textContent = 'Optimising the image\u2026';
+      file = await compressImageFile(original);
+    }
+    memberFormFile = file;
+
+    if(file.size > UPLOAD_LIMIT_BYTES){
+      scanStatus.textContent = 'This file is ' + (file.size/1024/1024).toFixed(1) + 'MB, over the 4MB limit. ' +
+        (file.type === 'application/pdf'
+          ? 'Re-scan the form as a JPG/PNG photo, or export the PDF at a lower resolution.'
+          : 'Try a lower-resolution scan.');
+      scanBtn.disabled = false;
+      return;
+    }
+
+    try{
+      let filled = null;
+      try{
+        filled = await aiScan(file);
+      }catch(aiErr){
+        scanStatus.textContent = aiErr.message + ' Falling back to the basic reader\u2026';
+        filled = null;
+      }
+      if(filled === null){
+        filled = await basicScan(file);
+      }
+      if(filled !== null){
+        scanStatus.textContent = filled
+          ? 'Filled ' + filled + ' field' + (filled===1?'':'s') + ' from the form \u2014 glance over them, then save.'
+          : 'Could not confidently read the details. Fill the fields manually \u2014 the form file will still be saved.';
+      }
+    }catch(e){
+      scanStatus.textContent = e.message || 'Reading failed \u2014 fill the fields manually.';
+    }
+    scanBtn.disabled = false;
+  };
+  scanBtn.onclick = runScan;
+  wrap.querySelector('#m-form-file').onchange = runScan; // auto-fill starts the moment a file is attached
+
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Add member';
+  b.onclick=async ()=>{
+    const name=document.getElementById('m-name').value.trim();
+    const contact=document.getElementById('m-contact').value.trim();
+    const plan=document.getElementById('m-plan').value;
+    const start=document.getElementById('m-start').value || todayStr();
+    const amount=parseFloat(document.getElementById('m-amount').value)||0;
+    const branch=document.getElementById('m-branch').value;
+    const status=document.getElementById('m-status').value;
+    const tshirtSize=document.getElementById('m-tshirt').value;
+    const source=document.getElementById('m-source').value;
+    const remarks=document.getElementById('m-remarks').value.trim();
+    const picked = wrap.querySelector('#m-form-file').files[0] || null;
+    const errEl=document.getElementById('m-error'); errEl.innerHTML='';
+    if(!picked){ errEl.innerHTML='<div class="notice err">The scanned membership form is required. Attach the PNG, JPG, or PDF before saving — a member cannot be added without their form on file.</div>'; return; }
+    if(!name){ errEl.innerHTML='<div class="notice err">Enter a name for this member.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    // Use the compressed copy if we made one; otherwise compress now.
+    let formFile = memberFormFile || picked;
+    if(formFile === picked && picked.type.startsWith('image/') && picked.size > UPLOAD_LIMIT_BYTES/2){
+      formFile = await compressImageFile(picked);
+    }
+    if(formFile.size > UPLOAD_LIMIT_BYTES){
+      errEl.innerHTML = `<div class="notice err">This form file is ${(formFile.size/1024/1024).toFixed(1)}MB, over the 4MB upload limit. Re-scan it as a JPG/PNG photo or at a lower resolution, then try again.</div>`;
+      b.disabled=false; b.textContent='Add member'; return;
+    }
+    try{
+      const fd = new FormData();
+      fd.append('file', formFile);
+      fd.append('name', name);
+      fd.append('contact', contact);
+      fd.append('plan', plan);
+      fd.append('startDate', start);
+      fd.append('amount', String(amount));
+      fd.append('branch', branch);
+      fd.append('status', status);
+      fd.append('tshirtSize', tshirtSize);
+      fd.append('source', source);
+      fd.append('remarks', remarks);
+      const res = await fetch('/api/members', {method:'POST', body:fd});
+      if(res.status === 413) throw new Error('The form file is too large to upload (limit about 4MB). Re-scan it smaller and try again.');
       const data = await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(data.error || 'Something went wrong.');
-      (data.inserted||[]).forEach(m=>state.members.push(mapMember(m)));
-      showResult(data);
-    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; saveBtn.disabled=false; saveBtn.textContent='Save'; }
-  }
-
-  function showResult(data){
-    const mismatches = (data.salesCheck||[]).filter(s=>s.mismatch);
-    wrap.innerHTML = `
-      <div class="notice ok">Uploaded ${data.inserted.length} member(s).</div>
-      ${mismatches.length ? mismatches.map(s=>`<div class="notice err">On ${escapeHtml(fmtDate(s.date))}, you uploaded ${s.uploadedCount} member(s), but the Sales Tracker shows ${s.expectedCount} Annual Membership sale(s) for that day — double-check for missing or extra entries.</div>`).join('') : ''}
-      <div class="action-row"><button class="btn primary" id="mb-done" type="button">Done</button></div>
-    `;
-    wrap.querySelector('#mb-done').onclick = ()=>{ state.modal=null; render(); };
-  }
-
-  function showStep3(){
-    wrap.innerHTML = `
-      <div class="notice">Check the auto-filled fields, remove any junk rows, then check for duplicates before saving. T-shirt size, Source, and the released dates aren't set here — you'll fill those in per member from the list afterward, once known.</div>
-      <div id="mb-grid-wrap"></div>
-      <div class="action-row" style="margin-top:10px;">
-        <button class="btn ghost" id="mb-back2" type="button">&larr; Re-map columns</button>
-        <button class="btn" id="mb-dup-btn" type="button">Check duplicates</button>
-        <span class="hint" id="mb-dup-status"></span>
-      </div>
-      <div id="mb-save-error"></div>
-      <div class="action-row">
-        <button class="btn primary" id="mb-save-btn" type="button">Save</button>
-      </div>
-    `;
-    wrap.querySelector('#mb-back2').onclick = showStep2;
-    wrap.querySelector('#mb-dup-btn').onclick = checkDuplicates;
-    wrap.querySelector('#mb-save-btn').onclick = saveRows;
-    renderGrid();
-  }
-
-  showStep1();
+      state.members.push(mapMember(data.member));
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add member'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
 }
 
 function renderRenewMemberModal(modal){
@@ -4916,10 +3827,6 @@ function renderPoTracker(el){
   const headTitle = state.trackerType==='PO' ? 'Purchase orders' : state.trackerType==='PettyCash' ? 'Petty cash' : 'All requests';
   trackerHead.innerHTML = `<h2>${headTitle}</h2>`;
   const tbar = document.createElement('div'); tbar.className='toolbar';
-  if(state.trackerSearch==null) state.trackerSearch='';
-  const tSearch = document.createElement('input');
-  tSearch.type='search'; tSearch.placeholder='Search requests\u2026'; tSearch.value=state.trackerSearch; tSearch.style.minWidth='220px';
-  tbar.appendChild(tSearch);
   const poCount = allRows.filter(r=>r.type==='PO').length;
   const pcCount = allRows.filter(r=>r.type==='PettyCash').length;
   const typeSel = document.createElement('select');
@@ -4951,7 +3858,6 @@ function renderPoTracker(el){
   const tbody = document.createElement('tbody');
   rows.forEach(r=>{
     const tr = document.createElement('tr');
-    tr.dataset.search = requestSearchText(r);
     tr.style.cursor = 'pointer';
     tr.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
     const paymentRef = r.check && r.check.number ? '#'+escapeHtml(r.check.number) : '—';
@@ -4983,10 +3889,6 @@ function renderPoTracker(el){
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
-  const applyTrackerSearch = ()=>{ const q=tSearch.value||'';
-    [...tbody.children].forEach(tr=>{ tr.style.display = requestMatchesQuery(tr.dataset.search||'', q) ? '' : 'none'; }); };
-  tSearch.oninput = ()=>{ state.trackerSearch=tSearch.value; applyTrackerSearch(); };
-  applyTrackerSearch();
   const tableCard = document.createElement('div'); tableCard.className='card';
   const scrollWrap = document.createElement('div'); scrollWrap.style.cssText='overflow-x:auto;';
   scrollWrap.appendChild(table);
@@ -5079,7 +3981,27 @@ function renderStaffModal(modal){
       try{ const {active} = await apiPatch(`/api/staff/${p.id}`, {action:'toggle-active'}); p.active = active; state.modal={type:'staff'}; render(); }
       catch(e){ alert(e.message); }
     };
-    td.appendChild(resetBtn); td.appendChild(btn);
+    const editBtn = document.createElement('button'); editBtn.className='btn sm'; editBtn.textContent='Edit';
+    editBtn.onclick = ()=>{ state.modal={type:'staffEdit', id:p.id}; render(); };
+    const activeSupers = state.staff.filter(s=>s.active!==false && (s.role==='Supervisor'||s.role==='Owner'));
+    const isSelf = !!(state.currentUser && (state.currentUser.id===p.id || state.currentUser.username===p.username));
+    const isLastSuper = (p.role==='Supervisor'||p.role==='Owner') && activeSupers.length<=1;
+    const delBtn = document.createElement('button'); delBtn.className='btn sm danger'; delBtn.textContent='Delete';
+    if(isSelf || isLastSuper){
+      delBtn.disabled=true;
+      delBtn.title = isSelf ? "You can't delete your own account" : "Can't delete the last super admin";
+    } else {
+      delBtn.onclick = async ()=>{
+        if(!confirm(`Delete ${p.name} permanently?\n\nThis removes their login account. Past sales stay under their name. Use Deactivate instead if you only want to block login.`)) return;
+        delBtn.disabled=true; delBtn.textContent='Deleting…';
+        try{
+          await apiDelete(`/api/staff/${p.id}`);
+          state.staff = state.staff.filter(s=>s.id!==p.id);
+          state.modal={type:'staff'}; render();
+        }catch(e){ alert(e.message); delBtn.disabled=false; delBtn.textContent='Delete'; }
+      };
+    }
+    td.appendChild(editBtn); td.appendChild(resetBtn); td.appendChild(btn); td.appendChild(delBtn);
     tr.appendChild(td);
     tbody.appendChild(tr);
   });
@@ -5122,6 +4044,42 @@ function renderStaffModal(modal){
       state.staff.push(staff);
       state.modal = {type:'staff'}; render();
     }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Add staff member'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderStaffEditModal(modal){
+  const p = state.staff.find(s=>s.id===state.modal.id);
+  if(!p){ state.modal={type:'staff'}; return render(); }
+  const head=document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<h2 style="font-size:16px;">Edit staff — ${escapeHtml(p.name)}</h2>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+  const ROLES=[['Admin','Admin — admin dashboard only'],['Supervisor','Supervisor — super admin (approvals)'],['Owner','Owner — super admin (payments)'],['Coach','Coach — coach dashboard only']];
+  const wrap=document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field full"><label>Full name</label><input id="se-name" value="${escapeHtml(p.name)}"></div>
+      <div class="field"><label>Username</label><input id="se-username" value="${escapeHtml(p.username||'')}"></div>
+      <div class="field"><label>Role</label><select id="se-role">${ROLES.map(([v,l])=>`<option value="${v}" ${p.role===v?'selected':''}>${l}</option>`).join('')}</select></div>
+    </div>
+    <div class="hint" style="margin-top:6px;">Renaming updates the staff account only. Past sales keep the old name in <code>entered_by</code> unless those rows are updated too.</div>
+    <div id="se-error"></div>`;
+  modal.appendChild(wrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Save changes';
+  b.onclick=async ()=>{
+    const name=document.getElementById('se-name').value.trim();
+    const username=document.getElementById('se-username').value.trim().toLowerCase();
+    const role=document.getElementById('se-role').value;
+    const errEl=document.getElementById('se-error'); errEl.innerHTML='';
+    if(!name){ errEl.innerHTML='<div class="notice err">Enter a name.</div>'; return; }
+    if(!username){ errEl.innerHTML='<div class="notice err">Enter a username.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {staff}=await apiPatch(`/api/staff/${p.id}`, {action:'edit', name, username, role});
+      Object.assign(p, staff||{name, username, role});
+      state.modal={type:'staff'}; render();
+    }catch(e){ errEl.innerHTML=`<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Save changes'; }
   };
   row.appendChild(b); modal.appendChild(row);
 }
@@ -5310,6 +4268,7 @@ function renderModal(){
   if(state.modal.type==='suppliers') return renderSuppliersModal(modal);
   if(state.modal.type==='pricelist') return renderPricelistModal(modal);
   if(state.modal.type==='staff') return renderStaffModal(modal);
+  if(state.modal.type==='staffEdit') return renderStaffEditModal(modal);
   if(state.modal.type==='resetPassword') return renderResetPasswordModal(modal);
   if(state.modal.type==='changePassword') return renderChangePasswordModal(modal);
   if(state.modal.type==='unfinishedPrompt') return renderUnfinishedPromptModal(modal);
@@ -5324,6 +4283,7 @@ function renderModal(){
   if(state.modal.type==='trialReschedule') return renderTrialRescheduleModal(modal);
   if(state.modal.type==='trialDaypass') return renderTrialDaypassModal(modal);
 }
+
 
 // ============ FREE TRIAL BOOKING ============
 // Online free-trial registrations arrive from a Google Form via Apps Script
@@ -5382,39 +4342,6 @@ function trialStatusPill(status){
   return `<span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;color:#0d0d0f;background:${color};">${escapeHtml(status)}</span>`;
 }
 
-// Day-pass QR code: uploaded once from here, stored in Supabase Storage, and
-// sent as a base64 attachment with every day-pass email (no Google Drive file ID).
-function renderTrialQrBox(){
-  const qr = state.trialQr || {exists:false};
-  const box = document.createElement('div');
-  box.style.cssText='display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 12px;background:var(--bg-2);border:1px solid var(--line);border-radius:7px;';
-  const label = document.createElement('span'); label.className='hint';
-  label.textContent = qr.exists
-    ? 'Day pass QR code: uploaded' + (qr.updatedAt ? (' ' + fmtDate(qr.updatedAt)) : '')
-    : 'No day-pass QR code uploaded yet — day passes can\'t be sent until one is.';
-  if(!qr.exists) label.style.color = '#f0a020';
-  const btn = document.createElement('button'); btn.className='btn sm ghost'; btn.textContent = qr.exists ? 'Replace QR code' : 'Upload QR code';
-  const input = document.createElement('input'); input.type='file'; input.accept='image/png,image/jpeg'; input.style.display='none';
-  btn.onclick = ()=> input.click();
-  input.onchange = async ()=>{
-    const file = input.files[0]; if(!file) return;
-    btn.disabled = true; btn.textContent = 'Uploading…';
-    try{
-      const fd = new FormData(); fd.append('file', file);
-      const res = await fetch('/api/trial-qr', {method:'POST', body:fd});
-      const data = await res.json().catch(()=>({}));
-      if(!res.ok) throw new Error(data.error || 'Upload failed.');
-      state.trialQr = {exists:true, path:data.path, updatedAt:data.updatedAt};
-      renderContent();
-    }catch(err){
-      alert(err.message);
-      btn.disabled = false; btn.textContent = qr.exists ? 'Replace QR code' : 'Upload QR code';
-    }
-  };
-  box.appendChild(label); box.appendChild(btn); box.appendChild(input);
-  return box;
-}
-
 function renderTrialBooking(el){
   const all = state.trialBookings || [];
   const pending = all.filter(b=>b.status==='Pending').length;
@@ -5430,7 +4357,6 @@ function renderTrialBooking(el){
     <div class="metric"><div class="num">${daypasses}</div><div class="lbl">Day passes sent</div></div>
   `;
   el.appendChild(metrics);
-  el.appendChild(renderTrialQrBox());
 
   const head = document.createElement('div'); head.className='section-head';
   head.innerHTML = '<h2>Free trial bookings</h2>';
