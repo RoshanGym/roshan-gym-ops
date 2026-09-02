@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../../../../lib/supabase';
-import { requireSession, requireRole, SUPER_ADMIN_ROLES } from '../../../../lib/auth';
+import { requireSession, requireRole, tierFor, SUPER_ADMIN_ROLES } from '../../../../lib/auth';
 import { withApi, ok } from '../../../../lib/api';
 
 export const dynamic = 'force-dynamic';
@@ -34,6 +34,74 @@ export const DELETE = withApi(async (req, { params }) => {
   const { data, error } = await db
     .from('requests')
     .update({ deleted_at: nowIso(), deleted_by: session.name, history })
+    .eq('id', params.id)
+    .select('*, attachments(*)')
+    .single();
+  if (error) throw error;
+  return ok({ request: data });
+});
+
+// Edit a request while it's still awaiting approval — after that, the
+// approval chain (checks, receipts, POS entries) depends on the amount/
+// line items staying put, so editing is locked the moment it moves past
+// "Pending Approval".
+export const PATCH = withApi(async (req, { params }) => {
+  const session = requireSession();
+  const db = supabaseAdmin();
+  const r = await loadRequest(db, params.id);
+
+  if (r.status !== 'Pending Approval') {
+    const err = new Error('Only requests still awaiting approval can be edited.');
+    err.status = 400;
+    throw err;
+  }
+  if (tierFor(session.role) !== 'SuperAdmin' && r.created_by_id && r.created_by_id !== session.id) {
+    const err = new Error('You can only edit your own requests.');
+    err.status = 403;
+    throw err;
+  }
+
+  const body = await req.json();
+  const history = Array.isArray(r.history) ? r.history : [];
+  let update = {};
+
+  if (r.type === 'PO') {
+    const { branch, supplier, payee, lineItems, notes } = body;
+    const validRows = (lineItems || []).filter((x) => x.item && x.item.trim() && x.qty > 0);
+    const amount = validRows.reduce((s, x) => s + x.qty * x.cost, 0);
+    if (!supplier || !payee || validRows.length === 0 || amount <= 0) {
+      const err = new Error('Supplier, payee, and at least one valid line item are required.');
+      err.status = 400;
+      throw err;
+    }
+    const title =
+      validRows.map((x) => x.item).slice(0, 2).join(', ') +
+      (validRows.length > 2 ? ` +${validRows.length - 2} more` : '');
+    update = {
+      title,
+      payee,
+      amount,
+      notes: notes || '',
+      branch,
+      supplier,
+      line_items: validRows.map((x) => ({ item: x.item, qty: x.qty, cost: x.cost, total: x.qty * x.cost })),
+    };
+  } else {
+    const { title, payee, amount, notes } = body;
+    if (!title || !payee || !amount || amount <= 0) {
+      const err = new Error('Fill in what this is for, the payee, and a valid amount.');
+      err.status = 400;
+      throw err;
+    }
+    update = { title, payee, amount, notes: notes || '' };
+  }
+
+  history.push({ at: nowIso(), text: 'Request edited before approval', by: session.name, role: session.role });
+  update.history = history;
+
+  const { data, error } = await db
+    .from('requests')
+    .update(update)
     .eq('id', params.id)
     .select('*, attachments(*)')
     .single();
