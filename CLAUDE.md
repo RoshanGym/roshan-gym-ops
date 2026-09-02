@@ -45,47 +45,65 @@ handoff; keep it updated.
   in Supabase.
 
 ## Feature: FREE Trial Booking
-Online free-trial registration via a Google Form (https://forms.gle/gh6ZQseNB5aL3QAeA).
+Online free-trial registration via a Google Form ("Roshan Gym - Free Trial Booking Form").
 Architecture: **app = control panel; Apps Script = receives the form + sends Gmail.**
 - Intake: Form submit -> intake Apps Script (`onTrialFormSubmit`) -> `POST /api/trial-intake`
-  (secret-protected) -> insert `trial_bookings` row (status `Pending`).
-- Dashboard: new "FREE Trial Booking" section under Admin in `public/app.js` (metrics,
-  filterable table, Details/Approve/Reschedule/Send-day-pass modals). Class services
-  (HIIT/Circuit, Boxing, MuayThai, Taekwondo) must land on a real class slot from the
-  branch schedule (embedded in app.js; source of truth `trial-class-schedule.json`);
-  Personal training and Gym Access take a free date/time.
-- Actions: `POST /api/trial-bookings/:id/action` with `{action:'approve'|'reschedule'|'daypass', ...}`
-  updates the row and calls the send Apps Script Web App, which sends Gmail (confirmation /
-  reschedule / day-pass). Both Apps Scripts run under `fitnessroshan@gmail.com` — that account
-  is the Gmail sender for these emails and owns the Google Form (so it's also the "receiver" of
-  form-submission notifications).
+  (secret-protected) -> insert `trial_bookings` row (status `Pending`). Field matching in
+  `handleIntake` (`lib/trial.js`) is title-*prefix*-based (`findAnswer`), not exact-match — the
+  live form's actual question titles carry embedded notes ("Preferred Time\n\nNote: ...") that
+  don't equal the plain labels, confirmed from an actual response export.
+- The "form received" auto-email (point #2 of the original spec) is **not** custom code — it's
+  the Google Form's own built-in "Send respondents a copy of their response" toggle
+  (Form Settings > Responses). Zero backend involvement.
+- Dashboard: "FREE Trial Booking" section under Admin in `public/app.js` (metrics, filterable
+  table, Details/Approve/Reject/Reschedule/Send-day-pass modals, an inline Outcome dropdown per
+  row). A red "N new" badge appears next to the section title in the topbar whenever there's a
+  Pending booking. Class services (HIIT/Circuit, Boxing, MuayThai, Taekwondo) must land on a
+  real class slot from the branch schedule (embedded in app.js; source of truth
+  `trial-class-schedule.json`); Personal training and Gym Access take a free date/time.
+- Actions: `POST /api/trial-bookings/:id/action` — no role restriction beyond being signed in
+  (any staff can approve/reject), matching the "any user can approve/reject" requirement:
+  - `approve` / `reschedule` / `daypass` — as before, each calls the send Apps Script (Gmail).
+  - `reject` (`{reason}`, required) — sets status `Rejected`. No email is sent for this one.
+  - `outcome` (`{outcome: 'Converted'|'For follow up'|null}`) — settable on a booking at any
+    status, tracks trial-to-membership conversion. Not stage-gated like the others.
 - Day-pass QR: uploaded once from the "Free Trial Booking" dashboard section (`POST
   /api/trial-qr`), stored in the Supabase `attachments` bucket under `trial/`, and read back
   server-side in `lib/trial.js` (`getDaypassQr`) to send as a base64 attachment (`qrBase64` +
   `qrContentType`) in the `daypass` payload to the send Apps Script. No Google Drive file ID —
   re-uploading from the dashboard replaces it in place. `handleAction` returns a 400 if a
   `daypass` action is attempted before one's been uploaded.
-- Files: `sql/trial-bookings-schema.sql`, `lib/trial.js`, the four `/api/trial-*` routes
-  (Pages- and App-router versions provided), `roshan-trial-intake.gs`, `roshan-trial-send.gs`.
-  The send script's `daypass` branch needs updating to attach `qrBase64`/`qrContentType` from
-  the request body (via `Utilities.newBlob(...)`) instead of `DriveApp.getFileById(QR_FILE_ID)`.
+- Files: `supabase/trial-bookings-schema.sql` + `supabase/migration-trial-bookings-2.sql`
+  (adds `Rejected` to the status check, `rejected_at`/`rejected_reason`, and `outcome`/
+  `outcome_at`), `lib/trial.js`, the four `/api/trial-*` routes, `roshan-trial-intake.gs`,
+  `roshan-trial-send.gs` (both written from scratch this round — they didn't actually exist in
+  the repo despite being referenced here; the owner confirmed neither was deployed yet either).
+  Both `.gs` files have their own setup instructions in a header comment (Script Properties,
+  trigger, Web app deployment). `roshan-trial-send.gs`'s `daypass` branch already attaches
+  `qrBase64`/`qrContentType` via `Utilities.newBlob(...)` — no `DriveApp`/`QR_FILE_ID` involved.
 
 ### Deploy checklist (remaining)
-1. Run `trial-bookings-schema.sql` in Supabase (creates `trial_bookings`). ✅ done.
-2. Commit `public/app.js`, `lib/trial.js`, and the `/api/trial-*` routes (match the repo's
-   router). Admin session guard is wired at `requireSession()` in the two `trial-bookings`
-   routes (same check `/api/auth/me` uses); `trial-intake` stays public/secret-only.
-3. Vercel env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (already set), plus
-   `TRIAL_INTAKE_SECRET`, `APPS_SCRIPT_SEND_URL`, `APPS_SCRIPT_SEND_SECRET` (new).
-4. Send Apps Script (standalone, under `fitnessroshan@gmail.com`) — update the `daypass`
-   branch to attach `qrBase64`/`qrContentType` instead of pulling from Drive; deploy as Web
-   app; Script Properties `SEND_SECRET` (= `APPS_SCRIPT_SEND_SECRET`). No `QR_FILE_ID` needed.
-5. Intake Apps Script (bound to the Form, under `fitnessroshan@gmail.com`) — set `API_URL` +
-   `SHARED_SECRET` (= `TRIAL_INTAKE_SECRET`); add an On-form-submit trigger.
-6. Upload the day-pass QR from the dashboard's "Free Trial Booking" section (Upload QR code
+1. Run `trial-bookings-schema.sql` in Supabase. ✅ done.
+2. Run `migration-trial-bookings-2.sql` in Supabase (Reject/Outcome columns). **Not yet run.**
+3. `public/app.js`, `lib/trial.js`, and the `/api/trial-*` routes are committed. Admin session
+   guard is `requireSession()` in the `trial-bookings` routes (same check `/api/auth/me` uses,
+   any signed-in staff — no role gate); `trial-intake` stays public/secret-only.
+4. Vercel env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (already set), plus
+   `TRIAL_INTAKE_SECRET`, `APPS_SCRIPT_SEND_URL`, `APPS_SCRIPT_SEND_SECRET` — **unconfirmed
+   whether these are actually set in Vercel yet.**
+5. Send Apps Script (`roshan-trial-send.gs`, standalone, under `fitnessroshan@gmail.com`) —
+   **not yet created in Google.** Paste the file in, set Script Property `SEND_SECRET` (=
+   `APPS_SCRIPT_SEND_SECRET`), deploy as Web app (Execute as: Me, Who has access: Anyone),
+   copy the Web app URL into `APPS_SCRIPT_SEND_URL`.
+6. Intake Apps Script (`roshan-trial-intake.gs`, bound to the Form, under
+   `fitnessroshan@gmail.com`) — **not yet created in Google.** Paste in, set Script Properties
+   `API_URL` + `SHARED_SECRET` (= `TRIAL_INTAKE_SECRET`), add an On-form-submit trigger.
+7. Form Settings > Responses > "Send responders a copy of their response" = Always. ✅ done.
+8. Upload the day-pass QR from the dashboard's "Free Trial Booking" section (Upload QR code
    button) — required before any day-pass email can send.
-7. Smoke test: submit form -> Pending row -> Approve (pick slot) -> confirmation email ->
-   Send day pass -> QR email. Test Reschedule too.
+9. Smoke test: submit form -> received-copy email -> Pending row (with the new-request badge)
+   -> Approve (pick slot) -> confirmation email -> Send day pass -> QR email. Test Reject and
+   Reschedule too, and setting an Outcome.
 Secret pairs must match: `SHARED_SECRET` = `TRIAL_INTAKE_SECRET`; send `SEND_SECRET` = `APPS_SCRIPT_SEND_SECRET`.
 
 ## Feature: Membership Tracker
