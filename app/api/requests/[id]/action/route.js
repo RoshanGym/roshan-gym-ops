@@ -42,14 +42,14 @@ export const POST = withApi(async (req, { params }) => {
   let update = {};
 
   if (action === 'approve') {
-    requireRole(session, ['Supervisor']);
+    requireRole(session, ['Supervisor', 'Owner']);
     if (r.status !== 'Pending Approval') badRequest('This request is not awaiting approval.');
     update.status = 'Approved';
     update.approval = { approvedBy: session.name, approvedAt: nowIso() };
-    log('Approved by supervisor');
+    log('Approved by ' + session.role.toLowerCase());
 
   } else if (action === 'reject') {
-    requireRole(session, ['Supervisor']);
+    requireRole(session, ['Supervisor', 'Owner']);
     if (r.status !== 'Pending Approval') badRequest('This request is not awaiting approval.');
     const reason = (body.reason || '').trim();
     if (!reason) badRequest('Add a reason so the admin knows what to fix.');
