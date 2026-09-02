@@ -34,6 +34,8 @@ let state = {
   memberStartFrom: '', memberStartTo: '',
   memberExpiryFrom: '', memberExpiryTo: '',
   memberSearch: '',
+  memberFormFilter: 'All',
+  reqSelected: {PO: new Set(), PettyCash: new Set()},
   trackerType: 'All',
   reqStatusFilter: null,
   reqRequestor: null,
@@ -1593,6 +1595,50 @@ function renderRequestsSection(el, type){
     .filter(r=>statusFilter==='All' || r.status===statusFilter)
     .filter(inRange).filter(matchesRequestor)
     .sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+
+  // Mass approval — tick items awaiting approval, then approve them together
+  // instead of one at a time. Selection is scoped to what's currently on
+  // screen, so a stale pick (approved/rejected/filtered out elsewhere) never
+  // lingers.
+  if(curRole()==='Supervisor'){
+    const pendingInView = list.filter(r=>r.status==='Pending Approval');
+    const selected = state.reqSelected[type];
+    [...selected].forEach(id=>{ if(!pendingInView.some(r=>r.id===id)) selected.delete(id); });
+    if(pendingInView.length){
+      const bulkBar = document.createElement('div'); bulkBar.className='toolbar'; bulkBar.style.margin='0 0 12px';
+      const allChecked = pendingInView.every(r=>selected.has(r.id));
+      const selAllLbl = document.createElement('label'); selAllLbl.style.cssText='display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-1);';
+      const selAllCb = document.createElement('input'); selAllCb.type='checkbox'; selAllCb.checked=allChecked;
+      selAllCb.onchange = ()=>{
+        if(selAllCb.checked) pendingInView.forEach(r=>selected.add(r.id));
+        else pendingInView.forEach(r=>selected.delete(r.id));
+        renderContent();
+      };
+      selAllLbl.appendChild(selAllCb);
+      selAllLbl.appendChild(document.createTextNode('Select all pending (' + pendingInView.length + ')'));
+      bulkBar.appendChild(selAllLbl);
+      if(selected.size){
+        const approveBtn = document.createElement('button'); approveBtn.className='btn primary sm'; approveBtn.textContent = `Approve selected (${selected.size})`;
+        approveBtn.onclick = async ()=>{
+          approveBtn.disabled=true; approveBtn.textContent='Approving…';
+          const ids = [...selected];
+          const results = await Promise.allSettled(ids.map(id=>apiPost(`/api/requests/${id}/action`, {action:'approve'})));
+          results.forEach((res,i)=>{
+            if(res.status==='fulfilled'){ upsertRequest(mapRequest(res.value.request)); selected.delete(ids[i]); }
+          });
+          const failed = results.filter(x=>x.status==='rejected');
+          render();
+          if(failed.length) alert(`${failed.length} of ${ids.length} could not be approved: ` + failed.map(f=>f.reason.message).join('; '));
+        };
+        bulkBar.appendChild(approveBtn);
+        const clearBtn = document.createElement('button'); clearBtn.className='btn sm ghost'; clearBtn.textContent='Clear selection';
+        clearBtn.onclick = ()=>{ selected.clear(); renderContent(); };
+        bulkBar.appendChild(clearBtn);
+      }
+      el.appendChild(bulkBar);
+    }
+  }
+
   if(list.length===0){
     const e = document.createElement('div'); e.className='empty';
     if(reqFilter!=='All'){
@@ -1622,7 +1668,26 @@ function renderReqCard(r){
   const card = document.createElement('div'); card.className='card row-card';
   card.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
   const idx = stageIndex(r.status); const isRejected = r.status==='Rejected';
+  const canBulkSelect = curRole()==='Supervisor' && r.status==='Pending Approval';
+  if(canBulkSelect){
+    const cbWrap = document.createElement('label');
+    cbWrap.style.cssText = 'display:flex;align-items:flex-start;padding-top:2px;';
+    cbWrap.onclick = (ev)=>ev.stopPropagation();
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.style.cssText = 'width:16px;height:16px;cursor:pointer;';
+    cb.checked = state.reqSelected[r.type].has(r.id);
+    cb.onchange = ()=>{
+      if(cb.checked) state.reqSelected[r.type].add(r.id); else state.reqSelected[r.type].delete(r.id);
+      renderContent();
+    };
+    cbWrap.appendChild(cb);
+    card.appendChild(cbWrap);
+    card.style.cssText = 'display:flex;gap:12px;align-items:flex-start;';
+  }
+  const body = document.createElement('div'); body.style.flex='1'; body.style.minWidth='0';
+  card.appendChild(body);
   const top = document.createElement('div'); top.className='req-top';
+  body.appendChild(top);
   top.innerHTML = `
     <div>
       <span class="badge ${r.type==='PO'?'po':'pc'}">${r.type==='PO'?'Purchase order':'Petty cash'}</span>
@@ -1633,7 +1698,6 @@ function renderReqCard(r){
     </div>
     <div class="req-amount">${fmtMoney(r.amount)}</div>
   `;
-  card.appendChild(top);
   if(!isRejected){
     const stepper = document.createElement('div'); stepper.className='stepper';
     STAGES.forEach((s,i)=>{
@@ -1644,11 +1708,11 @@ function renderReqCard(r){
       sw.appendChild(dot); sw.appendChild(lbl); stepper.appendChild(sw);
       if(i<STAGES.length-1){ const bar=document.createElement('div'); bar.className='bar'+(i<idx?' done':''); stepper.appendChild(bar); }
     });
-    card.appendChild(stepper);
+    body.appendChild(stepper);
   } else {
     const rej = document.createElement('div'); rej.style.cssText='margin-top:10px;font-size:12px;color:var(--red-ink)';
     rej.textContent = 'Rejected: ' + (r.approval && r.approval.reason ? r.approval.reason : '');
-    card.appendChild(rej);
+    body.appendChild(rej);
   }
   const actions = actionsFor(r);
   if(actions.length){
@@ -1658,7 +1722,7 @@ function renderReqCard(r){
       b.onclick=(ev)=>{ ev.stopPropagation(); a.onClick(r); };
       row.appendChild(b);
     });
-    card.appendChild(row);
+    body.appendChild(row);
   }
   return card;
 }
@@ -1671,6 +1735,9 @@ function actionsFor(r){
       acts.push({label:'Delete permanently', variant:'danger', onClick:(r)=>purgeReq(r)});
     }
     return acts;
+  }
+  if(r.status==='Pending Approval' && (r.createdBy===curName() || accessTier(curRole())==='SuperAdmin')){
+    acts.push({label:'✎ Edit', onClick:(r)=>{ state.modal={type:'editRequest', id:r.id}; render(); }});
   }
   if(curRole()==='Supervisor' && r.status==='Pending Approval'){
     acts.push({label:'Approve', variant:'primary', onClick:(r)=>approveReq(r.id)});
@@ -1946,6 +2013,191 @@ function renderNewPOModal(modal){
     }catch(e){
       errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`;
       b.disabled=false; b.textContent='Submit for approval';
+    }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderEditRequestModal(modal){
+  const r = findReq(state.modal.id);
+  if(!r){ state.modal=null; return; }
+  if(r.type==='PO') return renderEditPOModal(modal, r);
+  return renderEditPettyCashModal(modal, r);
+}
+
+function renderEditPettyCashModal(modal, r){
+  const head = document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<h2 style="font-size:16px;">Edit — ${r.id}</h2>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field full"><label>What was this expense for</label><input id="f-title" value="${escapeHtml(r.title)}"></div>
+      <div class="field"><label>Staff member (paid to)</label><input id="f-payee" value="${escapeHtml(r.payee)}"></div>
+      <div class="field"><label>Amount (PHP)</label><input id="f-amount" type="number" min="0" step="0.01" value="${r.amount}"></div>
+      <div class="field full"><label>Notes</label><textarea id="f-notes">${escapeHtml(r.notes||'')}</textarea></div>
+    </div>
+    <div id="f-error"></div>
+  `;
+  modal.appendChild(wrap);
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Save changes';
+  b.onclick = async ()=>{
+    const title = document.getElementById('f-title').value.trim();
+    const payee = document.getElementById('f-payee').value.trim();
+    const amount = parseFloat(document.getElementById('f-amount').value);
+    const notes = document.getElementById('f-notes').value.trim();
+    const errEl = document.getElementById('f-error'); errEl.innerHTML='';
+    if(!title || !payee || !amount || amount<=0){ errEl.innerHTML='<div class="notice err">Fill in what this is for, the payee, and a valid amount.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {request} = await apiPatch(`/api/requests/${r.id}`, {title, payee, amount, notes});
+      upsertRequest(mapRequest(request));
+      state.modal = null; render();
+    }catch(e){
+      errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`;
+      b.disabled=false; b.textContent='Save changes';
+    }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
+function renderEditPOModal(modal, r){
+  const head = document.createElement('div'); head.className='modal-head';
+  head.innerHTML = `<h2 style="font-size:16px;">Edit — ${r.id}</h2>`;
+  head.appendChild(closeBtn()); modal.appendChild(head);
+
+  const datalist = document.createElement('datalist');
+  datalist.id = 'edit-products-datalist';
+  function fillDatalist(supplierKey){
+    datalist.innerHTML = productsForSupplierKey(supplierKey).filter(p=>p.active!==false).map(p=>`<option value="${escapeHtml(p.item)}">`).join('');
+  }
+  const existingSupplier = SUPPLIERS.find(s=>s.name===r.supplier);
+  fillDatalist(existingSupplier ? existingSupplier.key : null);
+  modal.appendChild(datalist);
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field"><label>Branch</label><select id="po-branch">${BRANCHES.map(b=>`<option value="${b.code}" ${b.code===r.branch?'selected':''}>${b.label}</option>`).join('')}</select></div>
+      <div class="field full">
+        <label>Supplier</label>
+        <select id="po-supplier">
+          <option value="">— Choose from supplier list —</option>
+          ${SUPPLIERS.map(s=>`<option value="${s.key}" ${existingSupplier&&existingSupplier.key===s.key?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}
+          <option value="__other__" ${!existingSupplier?'selected':''}>Other (not in supplier list)</option>
+        </select>
+      </div>
+      <div class="field full" id="po-supplier-other-wrap" style="display:${existingSupplier?'none':''}"><label>Supplier name</label><input id="po-supplier-other" value="${existingSupplier?'':escapeHtml(r.supplier||'')}"></div>
+      <div class="field full"><label>Check payable to</label><input id="po-payee" value="${escapeHtml(r.payee)}"></div>
+    </div>
+    <div class="hint" id="po-supplier-hint" style="margin-bottom:12px;"></div>
+    <div class="hint" style="margin-bottom:12px;">Purchase orders are paid by check only.</div>
+  `;
+  modal.appendChild(wrap);
+
+  const supplierSel = wrap.querySelector('#po-supplier');
+  const otherWrap = wrap.querySelector('#po-supplier-other-wrap');
+  const payeeInput = wrap.querySelector('#po-payee');
+  const hintEl = wrap.querySelector('#po-supplier-hint');
+  if(existingSupplier) hintEl.textContent = 'Contact: ' + (existingSupplier.contact||'—') + (existingSupplier.phone?' · '+existingSupplier.phone:'') + ' · Items below are filtered to what ' + existingSupplier.name + ' supplies.';
+  supplierSel.onchange = ()=>{
+    const val = supplierSel.value;
+    if(val==='__other__'){ otherWrap.style.display=''; hintEl.textContent=''; fillDatalist(null); return; }
+    otherWrap.style.display = 'none';
+    const sup = SUPPLIERS.find(s=>s.key===val);
+    if(sup){ payeeInput.value = sup.payTo; hintEl.textContent = 'Contact: ' + (sup.contact||'—') + (sup.phone?' · '+sup.phone:'') + ' · Items below are filtered to what ' + sup.name + ' supplies.'; fillDatalist(sup.key); }
+    else { hintEl.textContent=''; fillDatalist(null); }
+  };
+
+  const itemsCard = document.createElement('div');
+  itemsCard.className = 'card';
+  itemsCard.innerHTML = `<h2 style="font-size:13px;color:var(--ink-1);margin-bottom:10px;">Order items</h2><div id="po-rows"></div>`;
+  modal.appendChild(itemsCard);
+  const addRowBtn = document.createElement('button');
+  addRowBtn.className = 'btn sm'; addRowBtn.textContent = '+ Add item'; addRowBtn.style.marginTop='6px';
+  itemsCard.appendChild(addRowBtn);
+
+  let rows = (r.lineItems && r.lineItems.length ? r.lineItems : [{item:'', qty:1, cost:0}]).map(li=>({id:uid(), item:li.item||'', qty:li.qty||1, cost:li.cost||0, costTouched:true}));
+  const rowsEl = itemsCard.querySelector('#po-rows');
+
+  function renderRows(){
+    rowsEl.innerHTML = '';
+    rows.forEach(row=>{
+      const rowEl = document.createElement('div');
+      rowEl.style.cssText = 'display:grid;grid-template-columns:2fr 70px 100px 100px 32px;gap:8px;align-items:center;margin-bottom:8px;';
+      rowEl.innerHTML = `
+        <input list="edit-products-datalist" placeholder="Item" value="${escapeHtml(row.item)}" data-f="item" style="background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:8px 10px;font-size:13px;">
+        <input type="number" min="0" step="1" value="${row.qty}" data-f="qty" style="background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:8px 8px;font-size:13px;">
+        <input type="number" min="0" step="0.01" value="${row.cost}" data-f="cost" style="background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:8px 8px;font-size:13px;">
+        <div style="font-family:var(--font-m);font-size:12.5px;color:var(--ink-1);text-align:right;padding-right:4px;">${fmtMoney(row.qty*row.cost).replace('PHP ','')}</div>
+        <button data-act="remove" style="background:transparent;border:1px solid var(--line-strong);border-radius:7px;color:var(--ink-2);height:32px;">&times;</button>
+      `;
+      const itemInput = rowEl.querySelector('[data-f="item"]');
+      const qtyInput = rowEl.querySelector('[data-f="qty"]');
+      const costInput = rowEl.querySelector('[data-f="cost"]');
+      itemInput.oninput = ()=>{
+        row.item = itemInput.value;
+        const match = state.products.find(p=>p.item.toLowerCase()===itemInput.value.toLowerCase());
+        if(match && !row.costTouched){ row.cost = match.cost; costInput.value = match.cost; }
+        recompute();
+      };
+      qtyInput.oninput = ()=>{ row.qty = parseFloat(qtyInput.value)||0; recompute(); };
+      costInput.oninput = ()=>{ row.cost = parseFloat(costInput.value)||0; row.costTouched=true; recompute(); };
+      rowEl.querySelector('[data-act="remove"]').onclick = ()=>{ rows = rows.filter(x=>x.id!==row.id); if(rows.length===0) rows.push({id:uid(), item:'', qty:1, cost:0}); renderRows(); };
+      rowsEl.appendChild(rowEl);
+    });
+    recompute();
+  }
+  addRowBtn.onclick = ()=>{ rows.push({id:uid(), item:'', qty:1, cost:0}); renderRows(); };
+
+  const totalCard = document.createElement('div');
+  totalCard.className = 'check-callout';
+  totalCard.innerHTML = `<div class="hint" style="margin-bottom:2px;">Total amount</div><div class="num" id="po-total">PHP 0.00</div>`;
+  modal.appendChild(totalCard);
+  function recompute(){
+    const total = rows.reduce((s,x)=>s+(x.qty*x.cost),0);
+    document.getElementById('po-total').textContent = fmtMoney(total);
+  }
+  renderRows();
+
+  const rest = document.createElement('div');
+  rest.innerHTML = `
+    <div class="field full" style="margin-top:14px;"><label>Notes</label><textarea id="po-notes">${escapeHtml(r.notes||'')}</textarea></div>
+    <div id="po-error"></div>
+  `;
+  modal.appendChild(rest);
+
+  const row = document.createElement('div'); row.className='action-row';
+  const b = document.createElement('button'); b.className='btn primary'; b.textContent='Save changes';
+  b.onclick = async ()=>{
+    const branch = wrap.querySelector('#po-branch').value;
+    const supplierVal = supplierSel.value;
+    const supplierObj = SUPPLIERS.find(s=>s.key===supplierVal);
+    const supplierName = supplierVal==='__other__' ? wrap.querySelector('#po-supplier-other').value.trim() : (supplierObj ? supplierObj.name : '');
+    const payee = payeeInput.value.trim();
+    const notes = document.getElementById('po-notes').value.trim();
+    const errEl = document.getElementById('po-error'); errEl.innerHTML='';
+
+    const validRows = rows.filter(x=>x.item.trim() && x.qty>0);
+    const total = validRows.reduce((s,x)=>s+(x.qty*x.cost),0);
+
+    if(!supplierName){ errEl.innerHTML='<div class="notice err">Choose a supplier, or enter one if it is not on the list.</div>'; return; }
+    if(!payee){ errEl.innerHTML='<div class="notice err">Enter who the check should be payable to.</div>'; return; }
+    if(validRows.length===0 || total<=0){ errEl.innerHTML='<div class="notice err">Add at least one item with a quantity greater than zero.</div>'; return; }
+
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {request} = await apiPatch(`/api/requests/${r.id}`, {
+        branch, supplier:supplierName, payee,
+        lineItems: validRows.map(x=>({item:x.item, qty:x.qty, cost:x.cost})),
+        notes,
+      });
+      upsertRequest(mapRequest(request));
+      state.modal = null; render();
+    }catch(e){
+      errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`;
+      b.disabled=false; b.textContent='Save changes';
     }
   };
   row.appendChild(b); modal.appendChild(row);
@@ -4068,10 +4320,16 @@ function renderMembership(el){
     <option value="Manila" ${state.memberBranch==='Manila'?'selected':''}>Manila</option>
     <option value="Malabon" ${state.memberBranch==='Malabon'?'selected':''}>Malabon</option>
   </select>
-  <input id="member-search" type="text" placeholder="Search name" value="${escapeHtml(state.memberSearch||'')}" style="min-width:180px;">`;
+  <input id="member-search" type="text" placeholder="Search name" value="${escapeHtml(state.memberSearch||'')}" style="min-width:180px;">
+  <select id="member-form-filter">
+    <option value="All" ${state.memberFormFilter==='All'?'selected':''}>Form: all</option>
+    <option value="Missing" ${state.memberFormFilter==='Missing'?'selected':''}>Form: missing</option>
+    <option value="OnFile" ${state.memberFormFilter==='OnFile'?'selected':''}>Form: on file</option>
+  </select>`;
   head.appendChild(toolbar);
   toolbar.querySelector('#member-branch').onchange=(e)=>{ state.memberBranch=e.target.value; renderContent(); };
   toolbar.querySelector('#member-search').oninput=(e)=>{ state.memberSearch=e.target.value; renderContent(); };
+  toolbar.querySelector('#member-form-filter').onchange=(e)=>{ state.memberFormFilter=e.target.value; renderContent(); };
 
   const startRangeWrap = document.createElement('span'); startRangeWrap.style.cssText='display:inline-flex;align-items:center;gap:4px;';
   const startLbl = document.createElement('span'); startLbl.className='hint'; startLbl.textContent='Membership date:';
@@ -4142,6 +4400,8 @@ function renderMembership(el){
   list = list.filter(m=>inDateRange(m.expiryDate, state.memberExpiryFrom, state.memberExpiryTo));
   const memberQ = (state.memberSearch||'').trim().toLowerCase();
   if(memberQ) list = list.filter(m=>(m.name||'').toLowerCase().includes(memberQ));
+  if(state.memberFormFilter==='Missing') list = list.filter(m=>!m.formPath && !m.formUrl);
+  else if(state.memberFormFilter==='OnFile') list = list.filter(m=>m.formPath || m.formUrl);
   list.sort((a,b)=> a.expiryDate.localeCompare(b.expiryDate));
 
   if(list.length===0){
@@ -4202,6 +4462,22 @@ function renderMembership(el){
       };
       upBtn.onclick = ()=>fileInput.click();
       btns.push(upBtn, fileInput);
+
+      const editBtn = document.createElement('button'); editBtn.className='btn sm ghost'; editBtn.textContent='✎ Edit';
+      editBtn.onclick = ()=>{ state.modal={type:'editMember', id:m.id}; render(); };
+      btns.push(editBtn);
+
+      const delBtn = document.createElement('button'); delBtn.className='btn sm danger'; delBtn.textContent='🗑 Delete';
+      delBtn.onclick = async ()=>{
+        if(!confirm(`Delete ${m.name}? This can't be undone — use this for duplicate entries only.`)) return;
+        delBtn.disabled=true;
+        try{
+          await apiDelete(`/api/members/${m.id}`);
+          state.members = state.members.filter(x=>x.id!==m.id);
+          render();
+        }catch(e){ alert(e.message); delBtn.disabled=false; }
+      };
+      btns.push(delBtn);
     }
     return btns;
   }
@@ -4668,6 +4944,59 @@ function renderRenewMemberModal(modal){
   row.appendChild(b); modal.appendChild(row);
 }
 
+function renderEditMemberModal(modal){
+  const m = state.members.find(x=>x.id===state.modal.id);
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML = `<h2 style="font-size:16px;">Edit — ${escapeHtml(m.name)}</h2>`; head.appendChild(closeBtn()); modal.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="form-grid">
+      <div class="field full"><label>Name</label><input id="e-name" value="${escapeHtml(m.name)}"></div>
+      <div class="field"><label>Contact no.</label><input id="e-contact" value="${escapeHtml(m.contact||'')}"></div>
+      <div class="field"><label>Email</label><input id="e-email" value="${escapeHtml(m.email||'')}"></div>
+      <div class="field"><label>Branch</label><select id="e-branch"><option ${m.branch==='Manila'?'selected':''}>Manila</option><option ${m.branch==='Malabon'?'selected':''}>Malabon</option></select></div>
+      <div class="field"><label>Membership type</label><select id="e-status">${MEMBER_STATUS_OPTIONS.map(s=>`<option ${m.status===s?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field"><label>Member no.</label><input id="e-memberno" value="${escapeHtml(m.memberNo||'')}"></div>
+      <div class="field"><label>Membership date</label><input id="e-start" type="date" value="${m.startDate||''}"></div>
+      <div class="field"><label>Expiry date</label><input id="e-expiry" type="date" value="${m.expiryDate||''}"></div>
+      <div class="field"><label>Amount paid (PHP)</label><input id="e-amount" type="number" min="0" step="0.01" value="${m.amount}"></div>
+      <div class="field"><label>T-shirt size</label><select id="e-tshirt"><option value="">—</option>${MEMBER_TSHIRT_OPTIONS.map(s=>`<option ${m.tshirtSize===s?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field"><label>Source</label><select id="e-source"><option value="">—</option>${MEMBER_SOURCE_OPTIONS.map(s=>`<option ${m.source===s?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field full"><label>Remarks</label><input id="e-remarks" value="${escapeHtml(m.remarks||'')}"></div>
+    </div>
+    <div id="e-error"></div>
+  `;
+  modal.appendChild(wrap);
+
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent='Save changes';
+  b.onclick=async ()=>{
+    const name=document.getElementById('e-name').value.trim();
+    const errEl=document.getElementById('e-error'); errEl.innerHTML='';
+    if(!name){ errEl.innerHTML='<div class="notice err">Name is required.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    try{
+      const {member} = await apiPatch(`/api/members/${m.id}`, {
+        name,
+        contact: document.getElementById('e-contact').value.trim(),
+        email: document.getElementById('e-email').value.trim(),
+        branch: document.getElementById('e-branch').value,
+        status: document.getElementById('e-status').value,
+        memberNo: document.getElementById('e-memberno').value.trim(),
+        startDate: document.getElementById('e-start').value,
+        expiryDate: document.getElementById('e-expiry').value,
+        amount: parseFloat(document.getElementById('e-amount').value)||0,
+        tshirtSize: document.getElementById('e-tshirt').value,
+        source: document.getElementById('e-source').value,
+        remarks: document.getElementById('e-remarks').value.trim(),
+      });
+      const i = state.members.findIndex(x=>x.id===m.id);
+      if(i>=0) state.members[i] = mapMember(member);
+      state.modal=null; render();
+    }catch(e){ errEl.innerHTML = `<div class="notice err">${escapeHtml(e.message)}</div>`; b.disabled=false; b.textContent='Save changes'; }
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
 // ============ PO TRACKER (reconciliation: PO + check payment + delivery receipt) ============
 function requestToExportRow(r){
   const checkAmt = (r.check && r.check.amount!=null) ? Number(r.check.amount) : Number(r.amount||0);
@@ -4978,7 +5307,7 @@ function renderPoTracker(el){
       <td>${r.delivery && r.delivery.confirmedAt ? fmtDate(r.delivery.confirmedAt.slice(0,10)) : '<span class="hint">—</span>'}</td>
       <td><span class="badge ${receiptOk?'ok':'neutral'}">${receiptOk?'Yes':'Pending'}</span></td>
       <td>${varianceCell}</td>
-      <td><span class="badge ${posOk?'ok':'neutral'}">${posOk?(posProof?'Recorded':'No proof'):'Pending'}</span></td>
+      <td><span class="badge ${posOk?'ok':r.status==='Rejected'?'flag':'neutral'}">${posOk?(posProof?'Recorded':'No proof'):(r.status==='Rejected'?'Rejected':'Pending')}</span></td>
     `;
     tbody.appendChild(tr);
   });
@@ -5307,6 +5636,7 @@ function renderModal(){
   if(state.modal.type==='pos') return renderPosModal(modal);
   if(state.modal.type==='variance') return renderVarianceModal(modal);
   if(state.modal.type==='newRequest') return renderNewRequestModal(modal, state.modal.reqType);
+  if(state.modal.type==='editRequest') return renderEditRequestModal(modal);
   if(state.modal.type==='suppliers') return renderSuppliersModal(modal);
   if(state.modal.type==='pricelist') return renderPricelistModal(modal);
   if(state.modal.type==='staff') return renderStaffModal(modal);
@@ -5319,6 +5649,7 @@ function renderModal(){
   if(state.modal.type==='newSale') return renderNewSaleModal(modal);
   if(state.modal.type==='newMember') return renderNewMemberModal(modal);
   if(state.modal.type==='renewMember') return renderRenewMemberModal(modal);
+  if(state.modal.type==='editMember') return renderEditMemberModal(modal);
   if(state.modal.type==='trialDetail') return renderTrialDetailModal(modal);
   if(state.modal.type==='trialApprove') return renderTrialApproveModal(modal);
   if(state.modal.type==='trialReschedule') return renderTrialRescheduleModal(modal);
