@@ -1600,7 +1600,7 @@ function renderRequestsSection(el, type){
   // instead of one at a time. Selection is scoped to what's currently on
   // screen, so a stale pick (approved/rejected/filtered out elsewhere) never
   // lingers.
-  if(curRole()==='Supervisor'){
+  if(accessTier(curRole())==='SuperAdmin'){
     const pendingInView = list.filter(r=>r.status==='Pending Approval');
     const selected = state.reqSelected[type];
     [...selected].forEach(id=>{ if(!pendingInView.some(r=>r.id===id)) selected.delete(id); });
@@ -1668,7 +1668,7 @@ function renderReqCard(r){
   const card = document.createElement('div'); card.className='card row-card';
   card.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
   const idx = stageIndex(r.status); const isRejected = r.status==='Rejected';
-  const canBulkSelect = curRole()==='Supervisor' && r.status==='Pending Approval';
+  const canBulkSelect = accessTier(curRole())==='SuperAdmin' && r.status==='Pending Approval';
   if(canBulkSelect){
     const cbWrap = document.createElement('label');
     cbWrap.style.cssText = 'display:flex;align-items:flex-start;padding-top:2px;';
@@ -1739,7 +1739,7 @@ function actionsFor(r){
   if(r.status==='Pending Approval' && (r.createdBy===curName() || accessTier(curRole())==='SuperAdmin')){
     acts.push({label:'✎ Edit', onClick:(r)=>{ state.modal={type:'editRequest', id:r.id}; render(); }});
   }
-  if(curRole()==='Supervisor' && r.status==='Pending Approval'){
+  if(accessTier(curRole())==='SuperAdmin' && r.status==='Pending Approval'){
     acts.push({label:'Approve', variant:'primary', onClick:(r)=>approveReq(r.id)});
     acts.push({label:'Reject', variant:'danger', onClick:(r)=>{ state.modal={type:'reject', id:r.id}; render(); }});
   }
@@ -5305,7 +5305,7 @@ function renderPoTracker(el){
       <td>${paymentRef}</td>
       <td>${r.check && r.check.date ? fmtDate(r.check.date) : '<span class="hint">—</span>'}</td>
       <td>${r.delivery && r.delivery.confirmedAt ? fmtDate(r.delivery.confirmedAt.slice(0,10)) : '<span class="hint">—</span>'}</td>
-      <td><span class="badge ${receiptOk?'ok':'neutral'}">${receiptOk?'Yes':'Pending'}</span></td>
+      <td><span class="badge ${receiptOk?'ok':r.status==='Rejected'?'flag':'neutral'}">${receiptOk?'Yes':(r.status==='Rejected'?'Rejected':'Pending')}</span></td>
       <td>${varianceCell}</td>
       <td><span class="badge ${posOk?'ok':r.status==='Rejected'?'flag':'neutral'}">${posOk?(posProof?'Recorded':'No proof'):(r.status==='Rejected'?'Rejected':'Pending')}</span></td>
     `;
