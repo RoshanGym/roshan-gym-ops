@@ -302,7 +302,18 @@ function render(){
   const visible = visibleSections();
   if(!visible.find(s=>s.key===state.section)){ state.section = visible.length ? visible[0].key : null; }
   const sec = SECTIONS.find(s=>s.key===state.section);
-  document.getElementById('sectionTitle').textContent = sec ? sec.label : 'Coach dashboard';
+  const titleEl = document.getElementById('sectionTitle');
+  titleEl.textContent = sec ? sec.label : 'Coach dashboard';
+  if(sec && sec.key==='trialbooking'){
+    const pendingTrials = (state.trialBookings||[]).filter(b=>b.status==='Pending').length;
+    if(pendingTrials>0){
+      const badge = document.createElement('span');
+      badge.className = 'badge flag';
+      badge.style.cssText = 'margin-left:8px;vertical-align:middle;';
+      badge.textContent = pendingTrials + ' new';
+      titleEl.appendChild(badge);
+    }
+  }
   document.getElementById('sectionSub').textContent = sec ? sec.sub : 'This dashboard is being built next.';
   renderContent();
   renderModal();
@@ -5654,6 +5665,7 @@ function renderModal(){
   if(state.modal.type==='trialApprove') return renderTrialApproveModal(modal);
   if(state.modal.type==='trialReschedule') return renderTrialRescheduleModal(modal);
   if(state.modal.type==='trialDaypass') return renderTrialDaypassModal(modal);
+  if(state.modal.type==='trialReject') return renderTrialRejectModal(modal);
 }
 
 // ============ FREE TRIAL BOOKING ============
@@ -5702,6 +5714,8 @@ function mapTrialBooking(b){
     confService:b.confirmed_service||'', confBranch:b.confirmed_branch||'', confDate:b.confirmed_date||'', confTime:b.confirmed_time||'',
     rescheduleReason:b.reschedule_reason||'', adminNotes:b.admin_notes||'',
     approvedAt:b.approved_at||null, confirmationSentAt:b.confirmation_email_sent_at||null, daypassSentAt:b.daypass_email_sent_at||null,
+    rejectedAt:b.rejected_at||null, rejectedReason:b.rejected_reason||'',
+    outcome:b.outcome||'', outcomeAt:b.outcome_at||null,
   };
 }
 function upsertTrialBooking(mapped){
@@ -5709,7 +5723,7 @@ function upsertTrialBooking(mapped){
   if(i>=0) state.trialBookings[i]=mapped; else state.trialBookings.unshift(mapped);
 }
 function trialStatusPill(status){
-  const color = status==='Approved' ? '#3fb950' : status==='Reschedule' ? '#f0a020' : status==='Completed' ? '#58a6ff' : '#8b949e';
+  const color = status==='Approved' ? '#3fb950' : status==='Reschedule' ? '#f0a020' : status==='Completed' ? '#58a6ff' : status==='Rejected' ? '#e5231b' : '#8b949e';
   return `<span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;color:#0d0d0f;background:${color};">${escapeHtml(status)}</span>`;
 }
 
@@ -5752,6 +5766,7 @@ function renderTrialBooking(el){
   const approved = all.filter(b=>b.status==='Approved').length;
   const resched = all.filter(b=>b.status==='Reschedule').length;
   const daypasses = all.filter(b=>b.daypassSentAt).length;
+  const converted = all.filter(b=>b.outcome==='Converted').length;
 
   const metrics = document.createElement('div'); metrics.className='metrics';
   metrics.innerHTML = `
@@ -5759,6 +5774,7 @@ function renderTrialBooking(el){
     <div class="metric good"><div class="num">${approved}</div><div class="lbl">Approved</div></div>
     <div class="metric ${resched>0?'flag':''}"><div class="num">${resched}</div><div class="lbl">For reschedule</div></div>
     <div class="metric"><div class="num">${daypasses}</div><div class="lbl">Day passes sent</div></div>
+    <div class="metric good"><div class="num">${converted}</div><div class="lbl">Converted</div></div>
   `;
   el.appendChild(metrics);
   el.appendChild(renderTrialQrBox());
@@ -5793,7 +5809,7 @@ function renderTrialBooking(el){
   if(!rows.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No bookings match this view yet.'; el.appendChild(e); return; }
 
   const table=document.createElement('table');
-  table.innerHTML='<thead><tr><th>Submitted</th><th>Name</th><th>Contact</th><th>Branch</th><th>Service</th><th>Preferred</th><th>Confirmed</th><th>Status</th><th></th></tr></thead>';
+  table.innerHTML='<thead><tr><th>Submitted</th><th>Name</th><th>Contact</th><th>Branch</th><th>Service</th><th>Preferred</th><th>Confirmed</th><th>Status</th><th>Outcome</th><th></th></tr></thead>';
   const tb=document.createElement('tbody');
   rows.forEach(b=>{
     const tr=document.createElement('tr');
@@ -5808,13 +5824,29 @@ function renderTrialBooking(el){
       <td>${preferred||'<span class="hint">—</span>'}</td>
       <td>${confirmed}</td>
       <td>${trialStatusPill(b.status)}${b.daypassSentAt?'<div class="hint">Day pass sent</div>':''}</td>
+      <td></td>
       <td></td>`;
+    const outcomeTd = tr.children[8];
+    const outcomeSel = document.createElement('select');
+    outcomeSel.innerHTML = ['','Converted','For follow up'].map(o=>`<option value="${o}" ${b.outcome===o?'selected':''}>${o||'—'}</option>`).join('');
+    outcomeSel.onchange = async ()=>{
+      outcomeSel.disabled = true;
+      try{
+        const res = await fetch(`/api/trial-bookings/${b.id}/action`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'outcome', outcome: outcomeSel.value||null})});
+        const data = await res.json().catch(()=>({}));
+        if(!res.ok) throw new Error(data.error || 'Something went wrong.');
+        upsertTrialBooking(mapTrialBooking(data.booking));
+        renderContent();
+      }catch(e){ alert(e.message); outcomeSel.disabled=false; }
+    };
+    outcomeTd.appendChild(outcomeSel);
     const actTd = tr.lastElementChild;
     const acts = document.createElement('div'); acts.style.cssText='display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;';
     function addBtn(label, variant, onClick){ const x=document.createElement('button'); x.className='btn sm'+(variant?(' '+variant):''); x.textContent=label; x.onclick=onClick; acts.appendChild(x); }
     addBtn('Details','ghost', ()=>{ state.modal={type:'trialDetail', id:b.id}; render(); });
     if(b.status==='Pending' || b.status==='Reschedule'){
       addBtn('Approve','primary', ()=>{ state.modal={type:'trialApprove', id:b.id}; render(); });
+      addBtn('Reject','danger', ()=>{ state.modal={type:'trialReject', id:b.id}; render(); });
     }
     if(b.status==='Pending' || b.status==='Approved'){
       addBtn('Reschedule', '', ()=>{ state.modal={type:'trialReschedule', id:b.id}; render(); });
@@ -5843,6 +5875,8 @@ function renderTrialDetailModal(modal){
     ['Consent', [b.consentAble?'Physically able':'', b.consentRules?'Follows rules':'', b.consentSchedule?'Accepts schedule':''].filter(Boolean).join(' · ')||'—'],
     ['Confirmed', b.confDate?(b.confService+' · '+b.confBranch+' · '+fmtDate(b.confDate)+' '+(b.confTime||'')):'—'],
     ['Reschedule reason', b.rescheduleReason||'—'],
+    ['Rejected reason', b.rejectedReason||'—'],
+    ['Outcome', b.outcome ? (b.outcome + (b.outcomeAt?(' · '+fmtDate(b.outcomeAt)):'')) : '—'],
   ];
   const wrap=document.createElement('div'); wrap.style.cssText='display:grid;grid-template-columns:150px 1fr;gap:6px 12px;font-size:13px;';
   rows.forEach(([k,v])=>{ wrap.innerHTML += `<div class="hint">${escapeHtml(k)}</div><div>${escapeHtml(String(v==null?'':v))}</div>`; });
@@ -5955,5 +5989,24 @@ function renderTrialDaypassModal(modal){
   row.appendChild(btn); modal.appendChild(row);
 }
 
+function renderTrialRejectModal(modal){
+  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Reject — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  const field=document.createElement('div'); field.className='field'; field.innerHTML='<label>Reason</label><textarea id="tr-reason" placeholder="Why is this trial request being rejected?"></textarea>'; modal.appendChild(field);
+  const errWrap=document.createElement('div'); errWrap.id='tr-error'; modal.appendChild(errWrap);
+  const row=document.createElement('div'); row.className='action-row';
+  const btn=document.createElement('button'); btn.className='btn danger'; btn.textContent='Reject request';
+  btn.onclick=async ()=>{
+    const reason=document.getElementById('tr-reason').value.trim();
+    const e=document.getElementById('tr-error');
+    if(!reason){ e.innerHTML='<div class="notice err">Add a reason so it is clear why this was rejected.</div>'; return; }
+    btn.disabled=true; btn.textContent='Saving…';
+    try{
+      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'reject', reason});
+      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
+    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Reject request'; }
+  };
+  row.appendChild(btn); modal.appendChild(row);
+}
 
 loadAll();
