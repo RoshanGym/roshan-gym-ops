@@ -1655,7 +1655,7 @@ function renderRequestsSection(el, type){
   const applyReqSearch = ()=>{ const q=searchInput.value||''; let shown=0;
     [...listWrap.children].forEach(c=>{ const ok=requestMatchesQuery(c.dataset.search||'', q); c.style.display=ok?'':'none'; if(ok)shown++; });
     noMatch.style.display=shown?'none':''; };
-  searchInput.oninput=()=>{ state.reqSearch[type]=searchInput.value; applyReqSearch(); };
+  btnGroup.insertBefore(searchButtonFor(searchInput, ()=>{ state.reqSearch[type]=searchInput.value; applyReqSearch(); }), searchInput.nextSibling);
   applyReqSearch();
 }
 
@@ -4271,6 +4271,15 @@ function renderNewSaleModal(modal){
   row.appendChild(b); modal.appendChild(row);
 }
 
+// Search runs on Enter or the Search button (and when the box is cleared), not on every keystroke.
+function searchButtonFor(input, run){
+  const b = document.createElement('button'); b.className='btn sm'; b.type='button'; b.textContent='Search';
+  b.onclick = run;
+  input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); run(); } });
+  input.addEventListener('search', ()=>{ if(!input.value) run(); });
+  return b;
+}
+
 // ============ MEMBERSHIP TRACKER ============
 const PLAN_MONTHS = {'Monthly':1, 'Quarterly':3, 'Annual':12, 'Class pack':0};
 
@@ -4358,8 +4367,8 @@ function renderMembership(el){
   const exportBtn=document.createElement('button'); exportBtn.className='btn'; exportBtn.textContent='Export to Excel';
   exportBtn.onclick=()=>{
     if(typeof XLSX==='undefined'){ alert('The Excel library did not load. Refresh the page.'); return; }
-    if(!withStatus.length){ alert('No members to export yet.'); return; }
-    const data = withStatus.map(m=>({
+    if(!list.length){ alert('No members match the current filters, so there is nothing to export.'); return; }
+    const data = list.map(m=>({
       'Member #': m.id,
       'Name': m.name,
       'Branch': m.branch||'',
@@ -5341,7 +5350,7 @@ function renderPoTracker(el){
   table.appendChild(tbody);
   const applyTrackerSearch = ()=>{ const q=tSearch.value||'';
     [...tbody.children].forEach(tr=>{ tr.style.display = requestMatchesQuery(tr.dataset.search||'', q) ? '' : 'none'; }); };
-  tSearch.oninput = ()=>{ state.trackerSearch=tSearch.value; applyTrackerSearch(); };
+  tbar.insertBefore(searchButtonFor(tSearch, ()=>{ state.trackerSearch=tSearch.value; applyTrackerSearch(); }), tSearch.nextSibling);
   applyTrackerSearch();
   const tableCard = document.createElement('div'); tableCard.className='card';
   const scrollWrap = document.createElement('div'); scrollWrap.style.cssText='overflow-x:auto;';
@@ -5619,7 +5628,9 @@ function renderRepository(el){
   search.innerHTML = `<input id="repo-search" placeholder="Search by request ID, title, or payee" style="width:100%;background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--ink-0);padding:10px 12px;font-size:13.5px;">`;
   el.appendChild(search);
   search.querySelector('#repo-search').value = state.search;
-  search.querySelector('#repo-search').oninput = (e)=>{ state.search = e.target.value; renderRepoGrid(); };
+  const repoInput = search.querySelector('#repo-search');
+  search.style.display = 'flex'; search.style.gap = '8px';
+  search.appendChild(searchButtonFor(repoInput, ()=>{ state.search = repoInput.value; renderRepoGrid(); }));
   const grid = document.createElement('div'); grid.className='repo-grid'; grid.id='repo-grid';
   el.appendChild(grid);
   renderRepoGrid();
