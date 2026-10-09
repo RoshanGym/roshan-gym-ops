@@ -5,7 +5,6 @@ const SECTIONS = [
   {key:'potracker', label:'PO tracker', sub:'PO, check payment, and delivery receipt matched automatically.'},
   {key:'sales', label:'Sales Dashboard', sub:'Revenue reports, targets, and admin performance.'},
   {key:'membership', label:'Membership tracker', sub:'Active, expiring, and expired memberships.'},
-  {key:'trialbooking', label:'FREE Trial Booking', sub:'Online free-trial registrations — approve, reschedule, and send day passes.'},
 ];
 
 let state = {
@@ -19,15 +18,11 @@ let state = {
   tasks: [],
   sales: [],
   members: [],
-  trialBookings: [],
-  trialFilter: 'All',
-  trialBranch: 'All',
-  trialSearch: '',
-  trialQr: null,
   search: '',
-  taskFilterDate: todayStr(),
+  taskFilterFrom: todayStr(), taskFilterTo: todayStr(),
   taskFilterAssignee: 'All',
   salesMonth: monthStr(new Date()),
+  salesEntriesFrom: '', salesEntriesTo: '',
   memberFilter: 'All',
   memberView: 'list',
   memberBranch: 'All',
@@ -262,9 +257,6 @@ async function loadAll(){
     // Sales targets power the actual-vs-target charts. Load separately so a
     // missing table (before its migration runs) doesn't break the whole app.
     try{ const t = await apiGet('/api/sales/targets'); state.targets = t.targets||[]; }catch(e){ state.targets = []; }
-    // Trial bookings load separately too, so a pending migration doesn't break the app.
-    try{ const tb = await apiGet('/api/trial-bookings'); state.trialBookings = (tb.bookings||[]).map(mapTrialBooking); }catch(e){ state.trialBookings = []; }
-    try{ state.trialQr = await apiGet('/api/trial-qr'); }catch(e){ state.trialQr = {exists:false}; }
   }catch(e){
     // Could be an expired session — but could also be a real server error
     // (e.g. a pending database migration). Surface it on the login screen
@@ -302,18 +294,7 @@ function render(){
   const visible = visibleSections();
   if(!visible.find(s=>s.key===state.section)){ state.section = visible.length ? visible[0].key : null; }
   const sec = SECTIONS.find(s=>s.key===state.section);
-  const titleEl = document.getElementById('sectionTitle');
-  titleEl.textContent = sec ? sec.label : 'Coach dashboard';
-  if(sec && sec.key==='trialbooking'){
-    const pendingTrials = (state.trialBookings||[]).filter(b=>b.status==='Pending').length;
-    if(pendingTrials>0){
-      const badge = document.createElement('span');
-      badge.className = 'badge flag';
-      badge.style.cssText = 'margin-left:8px;vertical-align:middle;';
-      badge.textContent = pendingTrials + ' new';
-      titleEl.appendChild(badge);
-    }
-  }
+  document.getElementById('sectionTitle').textContent = sec ? sec.label : 'Coach dashboard';
   document.getElementById('sectionSub').textContent = sec ? sec.sub : 'This dashboard is being built next.';
   renderContent();
   renderModal();
@@ -450,7 +431,6 @@ function renderContent(){
     return renderSales(el);
   }
   if(state.section==='membership') return renderMembership(el);
-  if(state.section==='trialbooking') return renderTrialBooking(el);
   if(state.section==='repository'){ state.section='potracker'; return renderPoTracker(el); }
 }
 
@@ -1284,12 +1264,12 @@ function renderAdhocTasks(el){
   const toolbar = document.createElement('div');
   toolbar.className = 'toolbar';
   toolbar.innerHTML = `
-    <input type="date" id="task-date-filter" value="${state.taskFilterDate}">
     <select id="task-assignee-filter">
       <option value="All">All staff</option>
       ${assignees.map(a=>`<option value="${escapeHtml(a)}" ${state.taskFilterAssignee===a?'selected':''}>${escapeHtml(a)}</option>`).join('')}
     </select>
   `;
+  toolbar.appendChild(dateRangeControl(()=>state.taskFilterFrom, ()=>state.taskFilterTo, (f,t)=>{ state.taskFilterFrom=f; state.taskFilterTo=t; render(); }));
   head.innerHTML = '<h2>Task log</h2>';
   head.appendChild(toolbar);
   const adhocExBtn=document.createElement('button'); adhocExBtn.className='btn'; adhocExBtn.textContent='Export to Excel';
@@ -1321,10 +1301,14 @@ function renderAdhocTasks(el){
   }
   el.appendChild(head);
 
-  toolbar.querySelector('#task-date-filter').onchange = (e)=>{ state.taskFilterDate = e.target.value; renderContent(); };
   toolbar.querySelector('#task-assignee-filter').onchange = (e)=>{ state.taskFilterAssignee = e.target.value; renderContent(); };
 
-  let list = state.tasks.filter(t=> !state.taskFilterDate || (t.date <= state.taskFilterDate && state.taskFilterDate <= (t.dueDate||t.date)));
+  let list = state.tasks.filter(t=>{
+    const from = state.taskFilterFrom, to = state.taskFilterTo, tEnd = t.dueDate||t.date;
+    if(from && tEnd < from) return false;
+    if(to && t.date > to) return false;
+    return true;
+  });
   if(state.taskFilterAssignee!=='All') list = list.filter(t=>String(t.assignee||'').split(',').map(s=>s.trim()).includes(state.taskFilterAssignee));
   list = [...list].sort((a,b)=> (a.status==='Done')-(b.status==='Done') || a.assignee.localeCompare(b.assignee));
 
@@ -2923,14 +2907,18 @@ function renderPosPreview(host, preview){
 // ---------- ENTRIES ----------
 function renderSalesEntries(el){
   const month = state.salesMonth;
-  let monthSales = state.sales.filter(s=>s.date.slice(0,7)===month);
+  const hasRange = state.salesEntriesFrom || state.salesEntriesTo;
+  let monthSales = hasRange
+    ? state.sales.filter(s=>inDateRange(s.date, state.salesEntriesFrom, state.salesEntriesTo))
+    : state.sales.filter(s=>s.date.slice(0,7)===month);
   const branchFilter = state.salesBranch || 'All';
   if(branchFilter!=='All') monthSales = monthSales.filter(s=>salesBranchOf(s)===branchFilter);
 
   const head = document.createElement('div'); head.className='section-head';
-  head.innerHTML = '<h2>Entries — ' + month + '</h2>';
+  head.innerHTML = '<h2>Entries' + (hasRange ? '' : (' — ' + month)) + '</h2>';
   const toolbar = document.createElement('div'); toolbar.className='toolbar';
-  toolbar.innerHTML = `<input type="month" id="sales-month" value="${month}">`;
+  toolbar.innerHTML = `<input type="month" id="sales-month" value="${month}" ${hasRange?'disabled title="Clear the date range to use the month picker"':''}>`;
+  toolbar.appendChild(dateRangeControl(()=>state.salesEntriesFrom, ()=>state.salesEntriesTo, (f,t)=>{ state.salesEntriesFrom=f; state.salesEntriesTo=t; render(); }));
   const brSel = document.createElement('select');
   brSel.innerHTML = ['All','Manila','Malabon'].map(b=>`<option value="${b}" ${branchFilter===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
   brSel.onchange = ()=>{ state.salesBranch = brSel.value; render(); };
@@ -2955,7 +2943,7 @@ function renderSalesEntries(el){
   toolbar.querySelector('#sales-month').onchange = (e)=>{ state.salesMonth = e.target.value; render(); };
 
   if(monthSales.length===0){
-    const e=document.createElement('div'); e.className='empty'; e.textContent='No sales for this month yet.'; el.appendChild(e); return;
+    const e=document.createElement('div'); e.className='empty'; e.textContent = hasRange ? 'No sales in that date range.' : 'No sales for this month yet.'; el.appendChild(e); return;
   }
   const table = document.createElement('table'); table.className='simple'; table.style.minWidth='820px';
   table.innerHTML = `<thead><tr><th>Date</th><th>Branch</th><th>Category</th><th>Item</th><th>Availment</th><th>Kind</th><th>Admin</th><th style="text-align:right">Amount</th></tr></thead>`;
@@ -4322,7 +4310,7 @@ function renderMembership(el){
   toolbar.innerHTML = `<select id="member-filter">
     <option value="All" ${state.memberFilter==='All'?'selected':''}>All</option>
     <option value="Active" ${state.memberFilter==='Active'?'selected':''}>Active</option>
-    <option value="Expiring soon" ${state.memberFilter==='Expiring soon'?'selected':''}>Expiring soon</option>
+    <option value="Expiring soon" ${state.memberFilter==='Expiring soon'?'selected':''}>Expiring within 2 weeks</option>
     <option value="Expired" ${state.memberFilter==='Expired'?'selected':''}>Expired</option>
     <option value="Needs review" ${state.memberFilter==='Needs review'?'selected':''}>Needs review</option>
   </select>
@@ -4332,6 +4320,7 @@ function renderMembership(el){
     <option value="Malabon" ${state.memberBranch==='Malabon'?'selected':''}>Malabon</option>
   </select>
   <input id="member-search" type="text" placeholder="Search name" value="${escapeHtml(state.memberSearch||'')}" style="min-width:180px;">
+  <button class="btn sm" id="member-search-btn" type="button">Search</button>
   <select id="member-form-filter">
     <option value="All" ${state.memberFormFilter==='All'?'selected':''}>Form: all</option>
     <option value="Missing" ${state.memberFormFilter==='Missing'?'selected':''}>Form: missing</option>
@@ -4339,7 +4328,12 @@ function renderMembership(el){
   </select>`;
   head.appendChild(toolbar);
   toolbar.querySelector('#member-branch').onchange=(e)=>{ state.memberBranch=e.target.value; renderContent(); };
-  toolbar.querySelector('#member-search').oninput=(e)=>{ state.memberSearch=e.target.value; renderContent(); };
+  // Search runs on Enter or the Search button, not on every keystroke — typing a
+  // name used to re-filter (and lose input focus) after every letter.
+  const memberSearchInput = toolbar.querySelector('#member-search');
+  const runMemberSearch = ()=>{ state.memberSearch = memberSearchInput.value; renderContent(); };
+  toolbar.querySelector('#member-search-btn').onclick = runMemberSearch;
+  memberSearchInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); runMemberSearch(); } });
   toolbar.querySelector('#member-form-filter').onchange=(e)=>{ state.memberFormFilter=e.target.value; renderContent(); };
 
   const startRangeWrap = document.createElement('span'); startRangeWrap.style.cssText='display:inline-flex;align-items:center;gap:4px;';
@@ -4541,6 +4535,27 @@ function renderMembership(el){
     return sel;
   }
 
+  // Free-text remarks — saves on blur or Enter, not on every keystroke
+  // (same reasoning as the name search: typing shouldn't fire a save per letter).
+  function remarksInput(m){
+    if(!(curRole()==='Admin' || accessTier(curRole())==='SuperAdmin')){
+      const span = document.createElement('span'); span.textContent = m.remarks || '—';
+      return span;
+    }
+    const input = document.createElement('input');
+    input.type='text'; input.value = m.remarks || ''; input.placeholder='—'; input.style.width='160px';
+    const commit = async ()=>{
+      if(input.value === (m.remarks||'')) return;
+      input.disabled = true;
+      try{ await saveMemberDetail(m, 'remarks', input.value); }
+      catch(e){ alert(e.message); }
+      input.disabled = false;
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); input.blur(); } });
+    return input;
+  }
+
   if(state.memberView==='list'){
     const wrap = document.createElement('div'); wrap.style.overflowX='auto';
     const table = document.createElement('table'); table.className='simple';
@@ -4568,7 +4583,7 @@ function renderMembership(el){
         <td>${m.branch==='Malabon' ? '' : 'N/A'}</td>
         <td></td>
         <td><span class="badge ${badgeClass}">${m.computed}</span></td>
-        <td>${escapeHtml(m.remarks||'')}</td>
+        <td></td>
         <td></td>
       `;
       const cells = tr.children;
@@ -4576,6 +4591,7 @@ function renderMembership(el){
       cells[10].appendChild(releaseDateInput(m, 'tshirtReleasedDate', 'tshirtReleasedDate'));
       if(m.branch==='Malabon') cells[11].appendChild(releaseDateInput(m, 'keyfobReleasedDate', 'keyfobReleasedDate'));
       cells[12].appendChild(detailSelectInput(m, 'source', 'source', MEMBER_SOURCE_OPTIONS));
+      cells[14].appendChild(remarksInput(m));
       const actionsTd = tr.lastElementChild;
       actionsTd.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
       memberActionButtons(m).forEach(b=>actionsTd.appendChild(b));
@@ -5661,352 +5677,6 @@ function renderModal(){
   if(state.modal.type==='newMember') return renderNewMemberModal(modal);
   if(state.modal.type==='renewMember') return renderRenewMemberModal(modal);
   if(state.modal.type==='editMember') return renderEditMemberModal(modal);
-  if(state.modal.type==='trialDetail') return renderTrialDetailModal(modal);
-  if(state.modal.type==='trialApprove') return renderTrialApproveModal(modal);
-  if(state.modal.type==='trialReschedule') return renderTrialRescheduleModal(modal);
-  if(state.modal.type==='trialDaypass') return renderTrialDaypassModal(modal);
-  if(state.modal.type==='trialReject') return renderTrialRejectModal(modal);
-}
-
-// ============ FREE TRIAL BOOKING ============
-// Online free-trial registrations arrive from a Google Form via Apps Script
-// (POST /api/trial-intake). Admin approves / reschedules and sends a day pass;
-// all emails go out through Apps Script + Gmail (see the send Web App).
-// Class services must land on a real class slot; Personal training and Gym
-// Access take a free date/time. Schedule mirrors trial-class-schedule.json.
-const TRIAL_CLASS_SERVICES = ['HIIT/Circuit Training','Boxing','MuayThai','Taekwondo'];
-const TRIAL_FREE_SERVICES  = ['Personal training','Gym Access'];
-const TRIAL_ALL_SERVICES   = ['Personal training','HIIT/Circuit Training','Boxing','MuayThai','Taekwondo','Gym Access'];
-const TRIAL_SCHEDULE = {
-  Manila: {
-    'HIIT/Circuit Training': ['Mon 07:00','Mon 09:00','Mon 13:00','Mon 16:30','Mon 18:00','Mon 19:30','Mon 21:30','Tue 07:00','Tue 09:00','Tue 13:00','Tue 16:30','Tue 18:00','Tue 19:30','Tue 21:30','Wed 07:00','Wed 09:00','Wed 13:00','Wed 16:30','Wed 18:00','Wed 19:30','Wed 21:30','Thu 07:00','Thu 09:00','Thu 13:00','Thu 16:30','Thu 18:00','Thu 19:30','Thu 21:30','Fri 07:00','Fri 09:00','Fri 13:00','Fri 16:30','Fri 18:00','Fri 19:30','Fri 21:30','Sat 07:00','Sat 09:00','Sat 13:00','Sat 17:00','Sat 19:30','Sat 21:30'],
-    'Boxing': ['Mon 16:30','Wed 16:30','Fri 16:30','Sun 17:00'],
-    'MuayThai': ['Mon 10:00','Wed 10:00','Fri 10:00','Mon 19:00','Tue 19:00','Wed 19:00','Thu 19:00','Fri 19:00'],
-    'Taekwondo': ['Sat 14:00','Sun 14:00','Sat 15:30','Sun 15:30'],
-  },
-  Malabon: {
-    'HIIT/Circuit Training': ['Mon 07:00','Mon 09:30','Mon 13:00','Mon 16:00','Mon 18:00','Mon 20:30','Tue 07:00','Tue 09:30','Tue 13:00','Tue 16:00','Tue 18:00','Tue 20:30','Wed 07:00','Wed 09:30','Wed 13:00','Wed 16:00','Wed 18:00','Wed 20:30','Thu 07:00','Thu 09:30','Thu 13:00','Thu 16:00','Thu 18:00','Thu 20:30','Fri 07:00','Fri 09:30','Fri 13:00','Fri 16:00','Fri 18:00','Fri 20:30','Sat 15:00','Sat 18:00','Sat 20:30'],
-    'Boxing': ['Mon 19:00','Wed 19:00','Fri 19:00','Sat 16:00','Sun 16:00'],
-    'MuayThai': ['Mon 19:00','Wed 19:00','Fri 19:00','Sat 16:00','Sun 16:00'],
-    'Taekwondo': ['Sat 07:00','Sun 07:00','Sat 10:00','Sun 10:00'],
-  },
-};
-function trialIsClass(service){ return TRIAL_CLASS_SERVICES.includes(service); }
-function trialSlotsFor(branch, service){ return (TRIAL_SCHEDULE[branch] && TRIAL_SCHEDULE[branch][service]) || []; }
-function trialFmtTime12(hhmm){ if(!hhmm) return ''; const p=String(hhmm).split(':'); let h=Number(p[0]); const m=p[1]||'00'; const ap=h<12?'AM':'PM'; h=h%12; if(h===0)h=12; return h+':'+m+' '+ap; }
-function trialNextDateForWeekday(abbr){
-  const map={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6}; const t=map[abbr];
-  if(t==null) return todayStr();
-  const d=new Date(); let add=(t-d.getDay()+7)%7; if(add===0) add=7; d.setDate(d.getDate()+add);
-  return d.toISOString().slice(0,10);
-}
-function mapTrialBooking(b){
-  return {
-    id:b.id, createdAt:b.created_at, submittedAt:b.submitted_at,
-    fullName:b.full_name, mobile:b.mobile_number, email:b.email,
-    gender:b.gender, genderOther:b.gender_other, age:b.age,
-    branch:b.preferred_branch||'', prefTime:b.preferred_time||'', prefDate:b.preferred_date||'',
-    service:b.service||'', goal:b.fitness_goal||'', frequency:b.exercise_frequency||'',
-    frequencyOther:b.exercise_frequency_other||'', injuries:b.injuries_medical||'',
-    heardAbout:b.heard_about_us||'', heardAboutOther:b.heard_about_us_other||'', referral:b.referral||'',
-    consentAble:!!b.consent_physically_able, consentRules:!!b.consent_follow_rules, consentSchedule:!!b.consent_schedule_subject,
-    status:b.status||'Pending',
-    confService:b.confirmed_service||'', confBranch:b.confirmed_branch||'', confDate:b.confirmed_date||'', confTime:b.confirmed_time||'',
-    rescheduleReason:b.reschedule_reason||'', adminNotes:b.admin_notes||'',
-    approvedAt:b.approved_at||null, confirmationSentAt:b.confirmation_email_sent_at||null, daypassSentAt:b.daypass_email_sent_at||null,
-    rejectedAt:b.rejected_at||null, rejectedReason:b.rejected_reason||'',
-    outcome:b.outcome||'', outcomeAt:b.outcome_at||null,
-  };
-}
-function upsertTrialBooking(mapped){
-  const i = state.trialBookings.findIndex(b=>b.id===mapped.id);
-  if(i>=0) state.trialBookings[i]=mapped; else state.trialBookings.unshift(mapped);
-}
-function trialStatusPill(status){
-  const color = status==='Approved' ? '#3fb950' : status==='Reschedule' ? '#f0a020' : status==='Completed' ? '#58a6ff' : status==='Rejected' ? '#e5231b' : '#8b949e';
-  return `<span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;color:#0d0d0f;background:${color};">${escapeHtml(status)}</span>`;
-}
-
-// Day-pass QR code: uploaded once from here, stored in Supabase Storage, and
-// sent as a base64 attachment with every day-pass email (no Google Drive file ID).
-function renderTrialQrBox(){
-  const qr = state.trialQr || {exists:false};
-  const box = document.createElement('div');
-  box.style.cssText='display:flex;align-items:center;gap:10px;margin-bottom:16px;padding:10px 12px;background:var(--bg-2);border:1px solid var(--line);border-radius:7px;';
-  const label = document.createElement('span'); label.className='hint';
-  label.textContent = qr.exists
-    ? 'Day pass QR code: uploaded' + (qr.updatedAt ? (' ' + fmtDate(qr.updatedAt)) : '')
-    : 'No day-pass QR code uploaded yet — day passes can\'t be sent until one is.';
-  if(!qr.exists) label.style.color = '#f0a020';
-  const btn = document.createElement('button'); btn.className='btn sm ghost'; btn.textContent = qr.exists ? 'Replace QR code' : 'Upload QR code';
-  const input = document.createElement('input'); input.type='file'; input.accept='image/png,image/jpeg'; input.style.display='none';
-  btn.onclick = ()=> input.click();
-  input.onchange = async ()=>{
-    const file = input.files[0]; if(!file) return;
-    btn.disabled = true; btn.textContent = 'Uploading…';
-    try{
-      const fd = new FormData(); fd.append('file', file);
-      const res = await fetch('/api/trial-qr', {method:'POST', body:fd});
-      const data = await res.json().catch(()=>({}));
-      if(!res.ok) throw new Error(data.error || 'Upload failed.');
-      state.trialQr = {exists:true, path:data.path, updatedAt:data.updatedAt};
-      renderContent();
-    }catch(err){
-      alert(err.message);
-      btn.disabled = false; btn.textContent = qr.exists ? 'Replace QR code' : 'Upload QR code';
-    }
-  };
-  box.appendChild(label); box.appendChild(btn); box.appendChild(input);
-  return box;
-}
-
-function renderTrialBooking(el){
-  const all = state.trialBookings || [];
-  const pending = all.filter(b=>b.status==='Pending').length;
-  const approved = all.filter(b=>b.status==='Approved').length;
-  const resched = all.filter(b=>b.status==='Reschedule').length;
-  const daypasses = all.filter(b=>b.daypassSentAt).length;
-  const converted = all.filter(b=>b.outcome==='Converted').length;
-
-  const metrics = document.createElement('div'); metrics.className='metrics';
-  metrics.innerHTML = `
-    <div class="metric ${pending>0?'flag':''}"><div class="num">${pending}</div><div class="lbl">Pending review</div></div>
-    <div class="metric good"><div class="num">${approved}</div><div class="lbl">Approved</div></div>
-    <div class="metric ${resched>0?'flag':''}"><div class="num">${resched}</div><div class="lbl">For reschedule</div></div>
-    <div class="metric"><div class="num">${daypasses}</div><div class="lbl">Day passes sent</div></div>
-    <div class="metric good"><div class="num">${converted}</div><div class="lbl">Converted</div></div>
-  `;
-  el.appendChild(metrics);
-  el.appendChild(renderTrialQrBox());
-
-  const head = document.createElement('div'); head.className='section-head';
-  head.innerHTML = '<h2>Free trial bookings</h2>';
-  const toolbar = document.createElement('div'); toolbar.className='toolbar';
-  toolbar.innerHTML = `
-    <select id="tb-status">
-      ${['All','Pending','Approved','Reschedule','Completed'].map(s=>`<option value="${s}" ${state.trialFilter===s?'selected':''}>${s}</option>`).join('')}
-    </select>
-    <select id="tb-branch">
-      ${['All','Manila','Malabon'].map(s=>`<option value="${s}" ${state.trialBranch===s?'selected':''}>${s}</option>`).join('')}
-    </select>
-    <input id="tb-search" type="text" placeholder="Search name, email, phone" value="${escapeHtml(state.trialSearch||'')}" style="min-width:200px;">
-  `;
-  head.appendChild(toolbar);
-  el.appendChild(head);
-  toolbar.querySelector('#tb-status').onchange=(e)=>{ state.trialFilter=e.target.value; renderContent(); };
-  toolbar.querySelector('#tb-branch').onchange=(e)=>{ state.trialBranch=e.target.value; renderContent(); };
-  toolbar.querySelector('#tb-search').oninput=(e)=>{ state.trialSearch=e.target.value; renderContent(); };
-
-  const q = (state.trialSearch||'').trim().toLowerCase();
-  let rows = all.filter(b=>{
-    if(state.trialFilter && state.trialFilter!=='All' && b.status!==state.trialFilter) return false;
-    if(state.trialBranch && state.trialBranch!=='All' && b.branch!==state.trialBranch) return false;
-    if(q){ const hay=(b.fullName+' '+b.email+' '+b.mobile).toLowerCase(); if(hay.indexOf(q)<0) return false; }
-    return true;
-  });
-  rows.sort((a,b)=> String(b.submittedAt||b.createdAt||'').localeCompare(String(a.submittedAt||a.createdAt||'')));
-
-  if(!rows.length){ const e=document.createElement('div'); e.className='empty'; e.textContent='No bookings match this view yet.'; el.appendChild(e); return; }
-
-  const table=document.createElement('table');
-  table.innerHTML='<thead><tr><th>Submitted</th><th>Name</th><th>Contact</th><th>Branch</th><th>Service</th><th>Preferred</th><th>Confirmed</th><th>Status</th><th>Outcome</th><th></th></tr></thead>';
-  const tb=document.createElement('tbody');
-  rows.forEach(b=>{
-    const tr=document.createElement('tr');
-    const confirmed = b.confDate ? (fmtDate(b.confDate)+' · '+(b.confTime||'')) : '<span class="hint">—</span>';
-    const preferred = (b.prefDate?fmtDate(b.prefDate):'') + (b.prefTime?(' · '+b.prefTime):'');
-    tr.innerHTML = `
-      <td>${b.submittedAt?fmtDate(b.submittedAt):fmtDate(b.createdAt)}</td>
-      <td>${escapeHtml(b.fullName)}<div class="hint">${escapeHtml(b.gender||'')}${b.age?(' · '+b.age):''}</div></td>
-      <td>${escapeHtml(b.mobile)}<div class="hint">${escapeHtml(b.email)}</div></td>
-      <td>${escapeHtml(b.branch)}</td>
-      <td>${escapeHtml(b.service)}</td>
-      <td>${preferred||'<span class="hint">—</span>'}</td>
-      <td>${confirmed}</td>
-      <td>${trialStatusPill(b.status)}${b.daypassSentAt?'<div class="hint">Day pass sent</div>':''}</td>
-      <td></td>
-      <td></td>`;
-    const outcomeTd = tr.children[8];
-    const outcomeSel = document.createElement('select');
-    outcomeSel.innerHTML = ['','Converted','For follow up'].map(o=>`<option value="${o}" ${b.outcome===o?'selected':''}>${o||'—'}</option>`).join('');
-    outcomeSel.onchange = async ()=>{
-      outcomeSel.disabled = true;
-      try{
-        const res = await fetch(`/api/trial-bookings/${b.id}/action`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'outcome', outcome: outcomeSel.value||null})});
-        const data = await res.json().catch(()=>({}));
-        if(!res.ok) throw new Error(data.error || 'Something went wrong.');
-        upsertTrialBooking(mapTrialBooking(data.booking));
-        renderContent();
-      }catch(e){ alert(e.message); outcomeSel.disabled=false; }
-    };
-    outcomeTd.appendChild(outcomeSel);
-    const actTd = tr.lastElementChild;
-    const acts = document.createElement('div'); acts.style.cssText='display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;';
-    function addBtn(label, variant, onClick){ const x=document.createElement('button'); x.className='btn sm'+(variant?(' '+variant):''); x.textContent=label; x.onclick=onClick; acts.appendChild(x); }
-    addBtn('Details','ghost', ()=>{ state.modal={type:'trialDetail', id:b.id}; render(); });
-    if(b.status==='Pending' || b.status==='Reschedule'){
-      addBtn('Approve','primary', ()=>{ state.modal={type:'trialApprove', id:b.id}; render(); });
-      addBtn('Reject','danger', ()=>{ state.modal={type:'trialReject', id:b.id}; render(); });
-    }
-    if(b.status==='Pending' || b.status==='Approved'){
-      addBtn('Reschedule', '', ()=>{ state.modal={type:'trialReschedule', id:b.id}; render(); });
-    }
-    if(b.status==='Approved' || b.status==='Reschedule'){
-      addBtn(b.daypassSentAt?'Resend day pass':'Send day pass','primary', ()=>{ state.modal={type:'trialDaypass', id:b.id}; render(); });
-    }
-    actTd.appendChild(acts);
-    tb.appendChild(tr);
-  });
-  table.appendChild(tb);
-  el.appendChild(table);
-}
-
-function trialFindBooking(id){ return (state.trialBookings||[]).find(b=>b.id===id); }
-
-function renderTrialDetailModal(modal){
-  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
-  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML=`<h2 style="font-size:16px;">${escapeHtml(b.fullName)} · free trial</h2>`; head.appendChild(closeBtn()); modal.appendChild(head);
-  const rows = [
-    ['Status', b.status], ['Submitted', b.submittedAt?fmtDateTime(b.submittedAt):fmtDateTime(b.createdAt)],
-    ['Email', b.email], ['Mobile', b.mobile], ['Gender', b.gender+(b.genderOther?(' ('+b.genderOther+')'):'')], ['Age', b.age],
-    ['Branch', b.branch], ['Service', b.service], ['Preferred date', b.prefDate?fmtDate(b.prefDate):'—'], ['Preferred time', b.prefTime||'—'],
-    ['Fitness goal', b.goal], ['Exercise frequency', b.frequency+(b.frequencyOther?(' ('+b.frequencyOther+')'):'')],
-    ['Injuries / medical', b.injuries||'—'], ['Heard about us', b.heardAbout+(b.heardAboutOther?(' ('+b.heardAboutOther+')'):'')], ['Referral', b.referral||'—'],
-    ['Consent', [b.consentAble?'Physically able':'', b.consentRules?'Follows rules':'', b.consentSchedule?'Accepts schedule':''].filter(Boolean).join(' · ')||'—'],
-    ['Confirmed', b.confDate?(b.confService+' · '+b.confBranch+' · '+fmtDate(b.confDate)+' '+(b.confTime||'')):'—'],
-    ['Reschedule reason', b.rescheduleReason||'—'],
-    ['Rejected reason', b.rejectedReason||'—'],
-    ['Outcome', b.outcome ? (b.outcome + (b.outcomeAt?(' · '+fmtDate(b.outcomeAt)):'')) : '—'],
-  ];
-  const wrap=document.createElement('div'); wrap.style.cssText='display:grid;grid-template-columns:150px 1fr;gap:6px 12px;font-size:13px;';
-  rows.forEach(([k,v])=>{ wrap.innerHTML += `<div class="hint">${escapeHtml(k)}</div><div>${escapeHtml(String(v==null?'':v))}</div>`; });
-  modal.appendChild(wrap);
-}
-
-// Shared field builder for Approve / Reschedule: service, branch, slot (class) or free date/time.
-function trialScheduleFields(b, prefix){
-  const service0 = b.confService || b.service || TRIAL_ALL_SERVICES[0];
-  const branch0  = b.confBranch  || b.branch  || 'Manila';
-  const date0    = b.confDate    || b.prefDate || todayStr();
-  const wrap=document.createElement('div');
-  wrap.innerHTML = `
-    <div class="form-grid">
-      <div class="field"><label>Service</label><select id="${prefix}-service">${TRIAL_ALL_SERVICES.map(s=>`<option value="${escapeHtml(s)}" ${s===service0?'selected':''}>${escapeHtml(s)}</option>`).join('')}</select></div>
-      <div class="field"><label>Branch</label><select id="${prefix}-branch">${['Manila','Malabon'].map(s=>`<option value="${s}" ${s===branch0?'selected':''}>${s}</option>`).join('')}</select></div>
-      <div class="field full" id="${prefix}-slot-wrap"><label>Class slot</label><select id="${prefix}-slot"></select><div class="hint" id="${prefix}-slot-hint"></div></div>
-      <div class="field"><label>Confirmed date</label><input id="${prefix}-date" type="date" value="${date0}"></div>
-      <div class="field"><label>Confirmed time</label><input id="${prefix}-time" type="text" placeholder="e.g. 7:00 AM" value="${escapeHtml(b.confTime||b.prefTime||'')}"></div>
-    </div>`;
-  const serviceSel=wrap.querySelector('#'+prefix+'-service');
-  const branchSel=wrap.querySelector('#'+prefix+'-branch');
-  const slotWrap=wrap.querySelector('#'+prefix+'-slot-wrap');
-  const slotSel=wrap.querySelector('#'+prefix+'-slot');
-  const slotHint=wrap.querySelector('#'+prefix+'-slot-hint');
-  const dateInp=wrap.querySelector('#'+prefix+'-date');
-  const timeInp=wrap.querySelector('#'+prefix+'-time');
-  function rebuildSlots(){
-    const svc=serviceSel.value, br=branchSel.value;
-    if(!trialIsClass(svc)){
-      slotWrap.style.display='none';
-      slotHint.textContent='';
-      return;
-    }
-    slotWrap.style.display='';
-    const slots=trialSlotsFor(br, svc);
-    if(!slots.length){ slotSel.innerHTML='<option value="">No class slots at this branch</option>'; slotHint.textContent='This service is not on the '+br+' schedule.'; return; }
-    slotSel.innerHTML='<option value="">— pick a class slot —</option>'+slots.map(s=>{ const [d,t]=s.split(' '); return `<option value="${s}">${d} · ${trialFmtTime12(t)}</option>`; }).join('');
-    slotHint.textContent='Only real '+svc+' slots for '+br+' are listed.';
-  }
-  slotSel && (slotSel.onchange=()=>{ const v=slotSel.value; if(!v) return; const [d,t]=v.split(' '); dateInp.value=trialNextDateForWeekday(d); timeInp.value=trialFmtTime12(t); });
-  serviceSel.onchange=rebuildSlots; branchSel.onchange=rebuildSlots;
-  rebuildSlots();
-  return { wrap, get(){ return { service:serviceSel.value, branch:branchSel.value, date:dateInp.value, time:timeInp.value.trim() }; } };
-}
-
-function renderTrialApproveModal(modal){
-  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
-  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Approve trial — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
-  const note=document.createElement('div'); note.className='hint'; note.style.margin='0 0 10px'; note.textContent='On approval the applicant gets a confirmation email (service, branch, date, time) via Gmail.'; modal.appendChild(note);
-  const fields=trialScheduleFields(b,'ap'); modal.appendChild(fields.wrap);
-  const err=document.createElement('div'); err.id='ap-error'; modal.appendChild(err);
-  const row=document.createElement('div'); row.className='action-row';
-  const btn=document.createElement('button'); btn.className='btn primary'; btn.textContent='Approve & send confirmation';
-  btn.onclick=async ()=>{
-    const v=fields.get(); const e=document.getElementById('ap-error'); e.innerHTML='';
-    if(!v.date || !v.time){ e.innerHTML='<div class="notice err">Set the confirmed date and time.</div>'; return; }
-    if(trialIsClass(v.service)){ const ok=trialSlotsFor(v.branch,v.service).length>0; if(!ok){ e.innerHTML='<div class="notice err">'+escapeHtml(v.service)+' has no slots at '+escapeHtml(v.branch)+'. Pick another branch or service.</div>'; return; } }
-    btn.disabled=true; btn.textContent='Sending…';
-    try{
-      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'approve', service:v.service, branch:v.branch, date:v.date, time:v.time});
-      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
-    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Approve & send confirmation'; }
-  };
-  row.appendChild(btn); modal.appendChild(row);
-}
-
-function renderTrialRescheduleModal(modal){
-  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
-  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Reschedule — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
-  const note=document.createElement('div'); note.className='hint'; note.style.margin='0 0 10px'; note.textContent='Set the new date/time and an optional reason. The applicant is emailed the new schedule.'; modal.appendChild(note);
-  const fields=trialScheduleFields(b,'rs'); modal.appendChild(fields.wrap);
-  const extra=document.createElement('div'); extra.innerHTML='<div class="field full"><label>Reason / note to applicant (optional)</label><input id="rs-reason" type="text" placeholder="e.g. Coach unavailable at your first choice"></div>'; modal.appendChild(extra);
-  const err=document.createElement('div'); err.id='rs-error'; modal.appendChild(err);
-  const row=document.createElement('div'); row.className='action-row';
-  const btn=document.createElement('button'); btn.className='btn primary'; btn.textContent='Save & email new schedule';
-  btn.onclick=async ()=>{
-    const v=fields.get(); const reason=(document.getElementById('rs-reason').value||'').trim(); const e=document.getElementById('rs-error'); e.innerHTML='';
-    if(!v.date || !v.time){ e.innerHTML='<div class="notice err">Set the new date and time.</div>'; return; }
-    btn.disabled=true; btn.textContent='Sending…';
-    try{
-      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'reschedule', service:v.service, branch:v.branch, date:v.date, time:v.time, reason});
-      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
-    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Save & email new schedule'; }
-  };
-  row.appendChild(btn); modal.appendChild(row);
-}
-
-function renderTrialDaypassModal(modal){
-  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
-  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Send day pass — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
-  const when = b.confDate ? (fmtDate(b.confDate)+' '+(b.confTime||'')) : 'your confirmed schedule';
-  const defClosing = `We can't wait to see you at Roshan Gym ${escapeHtml(b.confBranch||b.branch)}! Show this day pass at the front desk on ${escapeHtml(when)}. Come ready to sweat, have fun, and take the first step toward your goals. See you soon! 💪`;
-  const wrap=document.createElement('div');
-  wrap.innerHTML = `
-    <div class="hint" style="margin:0 0 10px;">Emails your existing POS QR code to <b>${escapeHtml(b.email)}</b> as a day pass, with the closing message below. (The QR image is attached automatically from Google Drive by the send script.)</div>
-    <div class="field full"><label>Closing message</label><textarea id="dp-closing" rows="4" style="width:100%;">${defClosing}</textarea></div>
-    <div id="dp-error"></div>`;
-  modal.appendChild(wrap);
-  const row=document.createElement('div'); row.className='action-row';
-  const btn=document.createElement('button'); btn.className='btn primary'; btn.textContent='Send day pass';
-  btn.onclick=async ()=>{
-    const closing=(document.getElementById('dp-closing').value||'').trim(); const e=document.getElementById('dp-error'); e.innerHTML='';
-    btn.disabled=true; btn.textContent='Sending…';
-    try{
-      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'daypass', closing});
-      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
-    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Send day pass'; }
-  };
-  row.appendChild(btn); modal.appendChild(row);
-}
-
-function renderTrialRejectModal(modal){
-  const b = trialFindBooking(state.modal.id); if(!b){ state.modal=null; return render(); }
-  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Reject — '+escapeHtml(b.fullName)+'</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
-  const field=document.createElement('div'); field.className='field'; field.innerHTML='<label>Reason</label><textarea id="tr-reason" placeholder="Why is this trial request being rejected?"></textarea>'; modal.appendChild(field);
-  const errWrap=document.createElement('div'); errWrap.id='tr-error'; modal.appendChild(errWrap);
-  const row=document.createElement('div'); row.className='action-row';
-  const btn=document.createElement('button'); btn.className='btn danger'; btn.textContent='Reject request';
-  btn.onclick=async ()=>{
-    const reason=document.getElementById('tr-reason').value.trim();
-    const e=document.getElementById('tr-error');
-    if(!reason){ e.innerHTML='<div class="notice err">Add a reason so it is clear why this was rejected.</div>'; return; }
-    btn.disabled=true; btn.textContent='Saving…';
-    try{
-      const {booking} = await apiPost(`/api/trial-bookings/${b.id}/action`, {action:'reject', reason});
-      upsertTrialBooking(mapTrialBooking(booking)); state.modal=null; render();
-    }catch(err2){ e.innerHTML=`<div class="notice err">${escapeHtml(err2.message)}</div>`; btn.disabled=false; btn.textContent='Reject request'; }
-  };
-  row.appendChild(btn); modal.appendChild(row);
 }
 
 loadAll();
