@@ -9,13 +9,14 @@ const FIELD_MAP = {
   source: 'source',
   tshirtReleasedDate: 'tshirt_released_date',
   keyfobReleasedDate: 'keyfob_released_date',
+  remarks: 'remarks',
 };
 
 // Fills in the operational details that don't come from the POS upload:
-// t-shirt size, source, and the t-shirt/keyfob released dates. These are
-// set per member from the Membership Tracker list once known (t-shirt size
-// and source once decided, released dates once the item is actually handed
-// over) — deliberately not required at upload time.
+// t-shirt size, source, remarks, and the t-shirt/keyfob released dates.
+// These are set per member from the Membership Tracker list once known
+// (t-shirt size and source once decided, released dates once the item is
+// actually handed over) — deliberately not required at upload time.
 export const POST = withApi(async (req, { params }) => {
   const session = requireSession();
   if (session.role !== 'Admin' && tierFor(session.role) !== 'SuperAdmin') {
