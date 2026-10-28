@@ -72,19 +72,22 @@ export const POST = withApi(async (req, { params }) => {
     const amount = parseFloat(body.amount);
     if (!number) badRequest('Enter the reference number.');
     if (!amount || amount <= 0) badRequest('Enter a valid amount.');
+    // One disbursement can cover several requests (bulk payout) — those share a batchId
+    // and a reference number, so they aren't treated as a duplicate of each other.
+    const batchId = /^DISB-\d{10,}$/.test(String(body.batchId || '')) ? String(body.batchId) : null;
     if (r.payment_method === 'Check') {
-      const { data: clash } = await db
+      const { data: clashes } = await db
         .from('requests')
-        .select('id')
+        .select('id, check_info')
         .neq('id', r.id)
         .eq('payment_method', 'Check')
-        .contains('check_info', { number })
-        .maybeSingle();
+        .contains('check_info', { number });
+      const clash = (clashes || []).find((c) => !(batchId && c.check_info?.batchId === batchId));
       if (clash) badRequest(`Check #${number} is already recorded on ${clash.id}. Double-check the number.`);
     }
     update.status = 'Check Prepared';
-    update.check_info = { number, date, amount, preparedBy: session.name, preparedAt: nowIso() };
-    log(`${r.payment_method || 'Check'} #${number} prepared for PHP ${fmt(amount)}, dated ${date}`);
+    update.check_info = { number, date, amount, preparedBy: session.name, preparedAt: nowIso(), ...(batchId ? { batchId } : {}) };
+    log(`${r.payment_method || 'Check'} #${number} prepared for PHP ${fmt(amount)}, dated ${date}` + (batchId ? ` (single disbursement ${batchId})` : ''));
 
   } else if (action === 'confirm-receipt') {
     requireRole(session, ['Supervisor']);
