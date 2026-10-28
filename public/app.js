@@ -22,7 +22,8 @@ let state = {
   taskFilterFrom: todayStr(), taskFilterTo: todayStr(),
   taskFilterAssignee: 'All',
   salesMonth: monthStr(new Date()),
-  salesEntriesFrom: '', salesEntriesTo: '',
+  salesEntriesFrom: '', salesEntriesTo: '', salesEntriesAdmin: 'All',
+  batchFrom: '', batchTo: '', batchStaff: 'All',
   memberFilter: 'All',
   memberView: 'list',
   memberBranch: 'All',
@@ -31,6 +32,7 @@ let state = {
   memberSearch: '',
   memberFormFilter: 'All',
   reqSelected: {PO: new Set(), PettyCash: new Set()},
+  reqPaySelected: new Set(),
   trackerType: 'All',
   reqStatusFilter: null,
   reqRequestor: null,
@@ -1634,6 +1636,38 @@ function renderRequestsSection(el, type){
     }
   }
 
+  // Single cash disbursement — the Owner ticks approved petty cash requests that are
+  // being paid out together, then records one reference/date for all of them.
+  if(type==='PettyCash' && curRole()==='Owner'){
+    const approvedInView = list.filter(r=>r.status==='Approved');
+    const paySel = state.reqPaySelected;
+    [...paySel].forEach(id=>{ if(!approvedInView.some(r=>r.id===id)) paySel.delete(id); });
+    if(approvedInView.length){
+      const payBar = document.createElement('div'); payBar.className='toolbar'; payBar.style.margin='0 0 12px';
+      const allLbl = document.createElement('label'); allLbl.style.cssText='display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-1);';
+      const allCb = document.createElement('input'); allCb.type='checkbox'; allCb.checked = approvedInView.every(r=>paySel.has(r.id));
+      allCb.onchange = ()=>{
+        if(allCb.checked) approvedInView.forEach(r=>paySel.add(r.id)); else approvedInView.forEach(r=>paySel.delete(r.id));
+        renderContent();
+      };
+      allLbl.appendChild(allCb);
+      allLbl.appendChild(document.createTextNode('Select all approved, awaiting payment (' + approvedInView.length + ')'));
+      payBar.appendChild(allLbl);
+      if(paySel.size){
+        const picked = approvedInView.filter(r=>paySel.has(r.id));
+        const sum = picked.reduce((a,r)=>a+Number(r.amount||0),0);
+        const payBtn = document.createElement('button'); payBtn.className='btn primary sm';
+        payBtn.textContent = `Pay selected as one disbursement (${picked.length} · ${fmtMoney(sum)})`;
+        payBtn.onclick = ()=>{ state.modal = {type:'bulkPay', ids: picked.map(r=>r.id)}; render(); };
+        payBar.appendChild(payBtn);
+        const clr = document.createElement('button'); clr.className='btn sm ghost'; clr.textContent='Clear selection';
+        clr.onclick = ()=>{ paySel.clear(); renderContent(); };
+        payBar.appendChild(clr);
+      }
+      el.appendChild(payBar);
+    }
+  }
+
   if(list.length===0){
     const e = document.createElement('div'); e.className='empty';
     if(reqFilter!=='All'){
@@ -1663,16 +1697,21 @@ function renderReqCard(r){
   const card = document.createElement('div'); card.className='card row-card';
   card.onclick = ()=>{ state.modal={type:'detail', id:r.id}; render(); };
   const idx = stageIndex(r.status); const isRejected = r.status==='Rejected';
-  const canBulkSelect = accessTier(curRole())==='SuperAdmin' && r.status==='Pending Approval';
+  // Pending requests are ticked for bulk approval; approved petty cash is ticked
+  // (by the Owner, who prepares payments) to be paid out as one disbursement.
+  const forApproval = accessTier(curRole())==='SuperAdmin' && r.status==='Pending Approval';
+  const forPayout = curRole()==='Owner' && r.type==='PettyCash' && r.status==='Approved';
+  const canBulkSelect = forApproval || forPayout;
   if(canBulkSelect){
+    const selSet = forPayout ? state.reqPaySelected : state.reqSelected[r.type];
     const cbWrap = document.createElement('label');
     cbWrap.style.cssText = 'display:flex;align-items:flex-start;padding-top:2px;';
     cbWrap.onclick = (ev)=>ev.stopPropagation();
     const cb = document.createElement('input');
     cb.type = 'checkbox'; cb.style.cssText = 'width:16px;height:16px;cursor:pointer;';
-    cb.checked = state.reqSelected[r.type].has(r.id);
+    cb.checked = selSet.has(r.id);
     cb.onchange = ()=>{
-      if(cb.checked) state.reqSelected[r.type].add(r.id); else state.reqSelected[r.type].delete(r.id);
+      if(cb.checked) selSet.add(r.id); else selSet.delete(r.id);
       renderContent();
     };
     cbWrap.appendChild(cb);
@@ -2367,6 +2406,55 @@ function renderCheckModal(modal){
   row.appendChild(b); modal.appendChild(row);
 }
 
+// One cash disbursement covering several approved petty cash requests: a shared
+// reference + date, each request keeps its own amount, total shown for the payout.
+function renderBulkPayModal(modal){
+  const reqs = (state.modal.ids||[]).map(id=>findReq(id)).filter(r=>r && r.status==='Approved');
+  const head=document.createElement('div'); head.className='modal-head'; head.innerHTML='<h2 style="font-size:16px;">Pay as one disbursement</h2>'; head.appendChild(closeBtn()); modal.appendChild(head);
+  if(!reqs.length){
+    const n=document.createElement('div'); n.className='notice err'; n.textContent='None of the selected requests are still awaiting payment.'; modal.appendChild(n); return;
+  }
+  const total = reqs.reduce((a,r)=>a+Number(r.amount||0),0);
+  const info=document.createElement('div'); info.className='notice';
+  info.textContent = `${reqs.length} approved requests totalling ${fmtMoney(total)} will be marked as paid together under one reference. Each keeps its own amount.`;
+  modal.appendChild(info);
+  const tbl=document.createElement('table'); tbl.className='simple'; tbl.style.width='100%';
+  tbl.innerHTML = '<thead><tr><th>Request</th><th>Payee</th><th>Branch</th><th style="text-align:right">Amount</th></tr></thead><tbody>'
+    + reqs.map(r=>`<tr><td>${escapeHtml(r.id)}<div class="hint">${escapeHtml(r.title||'')}</div></td><td>${escapeHtml(r.payee||'—')}</td><td>${escapeHtml(r.branch||'—')}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(r.amount).replace('PHP ','')}</td></tr>`).join('')
+    + `<tr style="font-weight:700;border-top:2px solid var(--line)"><td colspan="3">Total disbursement</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(total).replace('PHP ','')}</td></tr></tbody>`;
+  const tw=document.createElement('div'); tw.style.cssText='overflow-x:auto;max-height:280px;overflow-y:auto;margin:10px 0;'; tw.appendChild(tbl); modal.appendChild(tw);
+  const grid=document.createElement('div');
+  grid.innerHTML = `
+    <div class="form-grid">
+      <div class="field"><label>Reference (e.g. CASH, voucher no.)</label><input id="bp-ref" placeholder="e.g. CASH or voucher no."></div>
+      <div class="field"><label>Payment date</label><input id="bp-date" type="date" value="${todayStr()}"></div>
+      <div class="field full"><label>Attach copy (optional — added to every request)</label><input id="bp-file" type="file" accept="image/*,.pdf"></div>
+    </div>
+    <div id="bp-error"></div>`;
+  modal.appendChild(grid);
+  const row=document.createElement('div'); row.className='action-row';
+  const b=document.createElement('button'); b.className='btn primary'; b.textContent=`Mark ${reqs.length} as paid`;
+  b.onclick=async ()=>{
+    const ref=document.getElementById('bp-ref').value.trim();
+    const date=document.getElementById('bp-date').value || todayStr();
+    const errEl=document.getElementById('bp-error'); errEl.innerHTML='';
+    if(!ref){ errEl.innerHTML='<div class="notice err">Enter the reference number.</div>'; return; }
+    b.disabled=true; b.textContent='Saving…';
+    const batchId = 'DISB-' + Date.now();
+    const file = document.getElementById('bp-file').files[0];
+    const results = await Promise.allSettled(reqs.map(async r=>{
+      if(file) await apiUpload(`/api/requests/${r.id}/attachments`, file, 'Payment copy');
+      return apiPost(`/api/requests/${r.id}/action`, {action:'check', number:ref, date, amount:Number(r.amount), batchId});
+    }));
+    results.forEach((res,i)=>{ if(res.status==='fulfilled'){ upsertRequest(mapRequest(res.value.request)); state.reqPaySelected.delete(reqs[i].id); } });
+    const failed = results.map((res,i)=>({res,r:reqs[i]})).filter(x=>x.res.status==='rejected');
+    if(!failed.length){ state.modal=null; render(); return; }
+    state.modal = {type:'bulkPay', ids: failed.map(x=>x.r.id)}; render();
+    alert(`${reqs.length-failed.length} paid. ${failed.length} could not be saved and are still selected:\n` + failed.map(x=>x.r.id+': '+x.res.reason.message).join('\n'));
+  };
+  row.appendChild(b); modal.appendChild(row);
+}
+
 function renderDeliveryModal(modal){
   const r = findReq(state.modal.id); const isPO = r.type==='PO';
   const head=document.createElement('div'); head.className='modal-head'; head.innerHTML = `<h2 style="font-size:16px;">${isPO?'Log delivery':'Log reimbursement paid'}</h2>`; head.appendChild(closeBtn()); modal.appendChild(head);
@@ -2913,6 +3001,12 @@ function renderSalesEntries(el){
     : state.sales.filter(s=>s.date.slice(0,7)===month);
   const branchFilter = state.salesBranch || 'All';
   if(branchFilter!=='All') monthSales = monthSales.filter(s=>salesBranchOf(s)===branchFilter);
+  const adminOptions = [...new Set(monthSales.map(s=>(s.enteredBy||'').trim()).filter(Boolean))].sort();
+  if(state.salesEntriesAdmin && !adminOptions.includes(state.salesEntriesAdmin)) state.salesEntriesAdmin = 'All';
+  const adminFilter = state.salesEntriesAdmin || 'All';
+  if(adminFilter!=='All') monthSales = monthSales.filter(s=>(s.enteredBy||'').trim()===adminFilter);
+  const canEdit = canEditSales();
+  const selected = new Set();
 
   const head = document.createElement('div'); head.className='section-head';
   head.innerHTML = '<h2>Entries' + (hasRange ? '' : (' — ' + month)) + '</h2>';
@@ -2923,6 +3017,10 @@ function renderSalesEntries(el){
   brSel.innerHTML = ['All','Manila','Malabon'].map(b=>`<option value="${b}" ${branchFilter===b?'selected':''}>${b==='All'?'Both branches':b}</option>`).join('');
   brSel.onchange = ()=>{ state.salesBranch = brSel.value; render(); };
   toolbar.appendChild(brSel);
+  const adminSel = document.createElement('select');
+  adminSel.innerHTML = '<option value="All">All admins</option>' + adminOptions.map(a=>`<option value="${escapeHtml(a)}" ${adminFilter===a?'selected':''}>${escapeHtml(a)}</option>`).join('');
+  adminSel.onchange = ()=>{ state.salesEntriesAdmin = adminSel.value; render(); };
+  toolbar.appendChild(adminSel);
   const exBtn=document.createElement('button'); exBtn.className='btn'; exBtn.textContent='Export to Excel';
   exBtn.onclick=()=>{
     const rows = monthSales.map(s=>({
@@ -2945,12 +3043,126 @@ function renderSalesEntries(el){
   if(monthSales.length===0){
     const e=document.createElement('div'); e.className='empty'; e.textContent = hasRange ? 'No sales in that date range.' : 'No sales for this month yet.'; el.appendChild(e); return;
   }
+  const total = monthSales.reduce((a,s)=>a+s.amount,0);
+  const summary = document.createElement('div'); summary.className='hint'; summary.style.margin='0 0 8px';
+  summary.textContent = `${monthSales.length.toLocaleString()} entries · ${fmtMoney(total)}`;
+  el.appendChild(summary);
+
+  // Bulk-action bar — only appears once something is ticked. Updated in place
+  // (not via render()) so ticking boxes stays instant on long lists.
+  const bar = document.createElement('div'); bar.className='notice'; bar.style.cssText='display:none;align-items:center;gap:10px;flex-wrap:wrap;';
+  const barText = document.createElement('span');
+  const reassignBtn = document.createElement('button'); reassignBtn.className='btn sm'; reassignBtn.textContent='Change admin…';
+  const deleteBtn = document.createElement('button'); deleteBtn.className='btn sm ghost'; deleteBtn.textContent='Delete selected';
+  const clearBtn = document.createElement('button'); clearBtn.className='btn sm ghost'; clearBtn.textContent='Clear';
+  bar.append(barText, reassignBtn, deleteBtn, clearBtn);
+  if(canEdit) el.appendChild(bar);
+
+  const checkboxes = [];
+  let headBox = null;
+  const syncBar = ()=>{
+    const n = selected.size;
+    bar.style.display = n ? 'flex' : 'none';
+    const sum = monthSales.filter(s=>selected.has(s.id)).reduce((a,s)=>a+s.amount,0);
+    barText.textContent = `${n.toLocaleString()} selected · ${fmtMoney(sum)}`;
+    if(headBox){ headBox.checked = n>0 && n===monthSales.length; headBox.indeterminate = n>0 && n<monthSales.length; }
+  };
+  const refreshSales = async ()=>{
+    const fresh = await apiGet('/api/sales');
+    state.sales = (fresh.sales||[]).map(mapSale);
+    render();
+  };
+  const runBulk = async (body)=>{
+    [reassignBtn, deleteBtn, clearBtn].forEach(b=>b.disabled=true);
+    try{ await apiPost('/api/sales/entries', body); await refreshSales(); }
+    catch(e){ alert(e.message); [reassignBtn, deleteBtn, clearBtn].forEach(b=>b.disabled=false); }
+  };
+  const confirmAdminName = (name)=>{
+    if(adminOfName(name)) return true;
+    return confirm(`"${name}" doesn't match a known admin (${Object.keys(ADMIN_PERF_2026.admins).join(', ')}), so these sales won't count toward any admin in Sales by Admin.\n\nUse it anyway?`);
+  };
+  clearBtn.onclick = ()=>{ selected.clear(); checkboxes.forEach(c=>c.checked=false); syncBar(); };
+  deleteBtn.onclick = ()=>{
+    const rows = monthSales.filter(s=>selected.has(s.id));
+    if(!rows.length) return;
+    const sum = rows.reduce((a,s)=>a+s.amount,0);
+    if(!confirm(`Delete ${rows.length.toLocaleString()} entries totalling ${fmtMoney(sum)}?\n\nThis is permanent.`)) return;
+    runBulk({action:'delete', ids: rows.map(s=>s.id)});
+  };
+  reassignBtn.onclick = ()=>{
+    const rows = monthSales.filter(s=>selected.has(s.id));
+    if(!rows.length) return;
+    const name = (prompt(`New admin name for ${rows.length.toLocaleString()} entries:\n(${Object.keys(ADMIN_PERF_2026.admins).join(', ')})`, '')||'').trim();
+    if(!name || !confirmAdminName(name)) return;
+    runBulk({action:'reassign', ids: rows.map(s=>s.id), enteredBy: name});
+  };
+
+  // Click-to-edit admin name for a single entry (rendered as text until clicked,
+  // so long lists don't carry thousands of live inputs).
+  const adminCell = (s)=>{
+    const td = document.createElement('td');
+    const show = ()=>{ td.textContent = s.enteredBy||'—'; if(canEdit){ td.style.cursor='pointer'; td.title='Click to change the admin'; } };
+    show();
+    if(!canEdit) return td;
+    td.onclick = ()=>{
+      if(td.querySelector('input')) return;
+      td.style.cursor=''; td.textContent='';
+      const input = document.createElement('input'); input.type='text'; input.value=s.enteredBy||''; input.style.width='150px';
+      input.setAttribute('list','admin-names');
+      let done = false;
+      const finish = async (save)=>{
+        if(done) return; done = true;
+        const name = input.value.trim();
+        if(!save || !name || name===(s.enteredBy||'')){ show(); return; }
+        if(!confirmAdminName(name)){ show(); return; }
+        td.textContent = 'Saving…';
+        try{
+          await apiPost('/api/sales/entries', {action:'reassign', ids:[s.id], enteredBy:name});
+          s.enteredBy = name;
+        }catch(e){ alert(e.message); }
+        show();
+      };
+      input.addEventListener('blur', ()=>finish(true));
+      input.addEventListener('keydown', (e)=>{
+        if(e.key==='Enter'){ e.preventDefault(); input.blur(); }
+        else if(e.key==='Escape'){ e.preventDefault(); finish(false); }
+      });
+      td.appendChild(input); input.focus(); input.select();
+    };
+    return td;
+  };
+
+  const knownNames = [...new Set([...Object.keys(ADMIN_PERF_2026.admins), ...state.sales.map(s=>(s.enteredBy||'').trim()).filter(Boolean)])].sort();
+  const dl = document.createElement('datalist'); dl.id='admin-names';
+  dl.innerHTML = knownNames.map(n=>`<option value="${escapeHtml(n)}">`).join('');
+  el.appendChild(dl);
+
   const table = document.createElement('table'); table.className='simple'; table.style.minWidth='820px';
-  table.innerHTML = `<thead><tr><th>Date</th><th>Branch</th><th>Category</th><th>Item</th><th>Availment</th><th>Kind</th><th>Admin</th><th style="text-align:right">Amount</th></tr></thead>`;
+  table.innerHTML = `<thead><tr>${canEdit?'<th style="width:28px"></th>':''}<th>Date</th><th>Branch</th><th>Category</th><th>Item</th><th>Availment</th><th>Kind</th><th>Admin</th><th style="text-align:right">Amount</th></tr></thead>`;
+  if(canEdit){
+    headBox = document.createElement('input'); headBox.type='checkbox'; headBox.title='Select all shown';
+    headBox.onchange = ()=>{
+      selected.clear();
+      if(headBox.checked) monthSales.forEach(s=>selected.add(s.id));
+      checkboxes.forEach((c,i)=>{ c.checked = headBox.checked; });
+      syncBar();
+    };
+    table.querySelector('th').appendChild(headBox);
+  }
   const tbody = document.createElement('tbody');
-  [...monthSales].sort((a,b)=>b.date.localeCompare(a.date)).forEach(s=>{
+  const sorted = [...monthSales].sort((a,b)=>b.date.localeCompare(a.date));
+  sorted.forEach(s=>{
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${fmtDate(s.date)}</td><td>${escapeHtml(s.branch||'—')}</td><td>${escapeHtml(s.category)}${s.discipline?` <span class="hint">(${escapeHtml(s.discipline)})</span>`:''}</td><td>${escapeHtml(s.item||s.description||'—')}</td><td>${escapeHtml(s.availment||'—')}</td><td>${s.saleKind?`<span class="badge ${s.saleKind==='New'?'ok':'neutral'}">${s.saleKind}</span>`:'—'}</td><td>${escapeHtml(s.enteredBy||'—')}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(s.amount)}</td>`;
+    if(canEdit){
+      const cb = document.createElement('input'); cb.type='checkbox';
+      cb.onchange = ()=>{ if(cb.checked) selected.add(s.id); else selected.delete(s.id); syncBar(); };
+      checkboxes.push(cb);
+      const ctd = document.createElement('td'); ctd.appendChild(cb); tr.appendChild(ctd);
+    }
+    const body = document.createElement('template');
+    body.innerHTML = `<td>${fmtDate(s.date)}</td><td>${escapeHtml(s.branch||'—')}</td><td>${escapeHtml(s.category)}${s.discipline?` <span class="hint">(${escapeHtml(s.discipline)})</span>`:''}</td><td>${escapeHtml(s.item||s.description||'—')}</td><td>${escapeHtml(s.availment||'—')}</td><td>${s.saleKind?`<span class="badge ${s.saleKind==='New'?'ok':'neutral'}">${s.saleKind}</span>`:'—'}</td><td data-admin></td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(s.amount)}</td>`;
+    tr.appendChild(body.content);
+    tr.querySelector('td[data-admin]').replaceWith(adminCell(s));
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
@@ -4208,15 +4420,35 @@ async function renderSalesBatches(el){
   el.appendChild(host);
 
   try{
-    const {batches} = await apiGet('/api/sales/batches');
+    const {batches: allBatches} = await apiGet('/api/sales/batches');
     host.innerHTML = '';
-    if(!batches.length){ host.innerHTML = '<div class="empty">No POS imports yet.</div>'; return; }
+    if(!allBatches.length){ host.innerHTML = '<div class="empty">No POS imports yet.</div>'; return; }
+
+    // Filter by sales date (the report's start date) or by the day it was uploaded.
+    const bar = document.createElement('div'); bar.className='toolbar'; bar.style.marginBottom='12px';
+    const lbl = document.createElement('span'); lbl.className='hint'; lbl.textContent='Sales date:';
+    bar.append(lbl, dateRangeControl(()=>state.batchFrom, ()=>state.batchTo, (f,t)=>{ state.batchFrom=f; state.batchTo=t; render(); }));
+    const staffs = [...new Set(allBatches.map(b=>b.staff).filter(Boolean))].sort();
+    const staffSel = document.createElement('select');
+    staffSel.innerHTML = '<option value="All">All staff</option>' + staffs.map(s=>`<option value="${escapeHtml(s)}" ${state.batchStaff===s?'selected':''}>${escapeHtml(s)}</option>`).join('');
+    staffSel.onchange = ()=>{ state.batchStaff = staffSel.value; render(); };
+    bar.appendChild(staffSel);
+    host.appendChild(bar);
+
+    const batches = allBatches.filter(b=>inDateRange(b.date, state.batchFrom, state.batchTo)
+      && (!state.batchStaff || state.batchStaff==='All' || b.staff===state.batchStaff));
+    const count = document.createElement('div'); count.className='hint'; count.style.marginBottom='8px';
+    count.textContent = `${batches.length} of ${allBatches.length} uploads`;
+    host.appendChild(count);
+    if(!batches.length){
+      const e=document.createElement('div'); e.className='empty'; e.textContent='No uploads match this filter. A report that covers several days is filed under its first day.'; host.appendChild(e); return;
+    }
     const table = document.createElement('table'); table.className='simple';
-    table.innerHTML = '<thead><tr><th>Date</th><th>Staff</th><th>Branch</th><th>Lines</th><th style="text-align:right">Total</th><th></th></tr></thead>';
+    table.innerHTML = '<thead><tr><th>Date</th><th>Staff</th><th>Branch</th><th>Lines</th><th style="text-align:right">Total</th><th>Uploaded</th><th></th></tr></thead>';
     const tbody = document.createElement('tbody');
     batches.forEach(b=>{
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${fmtDate(b.date)}</td><td>${escapeHtml(b.staff||'—')}</td><td>${escapeHtml(b.branch||'—')}</td><td>${b.count}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(b.total)}</td>`;
+      tr.innerHTML = `<td>${fmtDate(b.date)}</td><td>${escapeHtml(b.staff||'—')}</td><td>${escapeHtml(b.branch||'—')}</td><td>${b.count}</td><td style="text-align:right;font-family:var(--font-m)">${fmtMoney(b.total)}</td><td class="hint">${b.uploadedAt?fmtDateTime(b.uploadedAt):'—'}</td>`;
       const td = document.createElement('td');
       const del = document.createElement('button'); del.className='btn sm ghost'; del.textContent='Remove';
       del.onclick = async ()=>{
@@ -5670,6 +5902,7 @@ function renderModal(){
   if(state.modal.type==='detail') return renderDetailModal(modal);
   if(state.modal.type==='reject') return renderRejectModal(modal);
   if(state.modal.type==='check') return renderCheckModal(modal);
+  if(state.modal.type==='bulkPay') return renderBulkPayModal(modal);
   if(state.modal.type==='delivery') return renderDeliveryModal(modal);
   if(state.modal.type==='pos') return renderPosModal(modal);
   if(state.modal.type==='variance') return renderVarianceModal(modal);
